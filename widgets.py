@@ -1,0 +1,1729 @@
+from __future__ import annotations
+
+import math
+from pathlib import Path
+from typing import Any, Callable
+
+from PySide6 import QtCore, QtGui, QtWidgets
+
+from theme_support import DEFAULT_THEME
+
+
+class CleanStepSpinBox(QtWidgets.QSpinBox):
+    """Spin box that does not auto-select text when stepped via arrow buttons."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._clicked_button = False
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        self._clicked_button = False
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            opt = QtWidgets.QStyleOptionSpinBox()
+            self.initStyleOption(opt)
+            up_rect = self.style().subControlRect(
+                QtWidgets.QStyle.ComplexControl.CC_SpinBox,
+                opt,
+                QtWidgets.QStyle.SubControl.SC_SpinBoxUp,
+                self,
+            )
+            down_rect = self.style().subControlRect(
+                QtWidgets.QStyle.ComplexControl.CC_SpinBox,
+                opt,
+                QtWidgets.QStyle.SubControl.SC_SpinBoxDown,
+                self,
+            )
+            if up_rect.contains(event.position().toPoint()) or down_rect.contains(event.position().toPoint()):
+                self._clicked_button = True
+        super().mousePressEvent(event)
+        if self._clicked_button:
+            QtCore.QTimer.singleShot(0, self._clear_line_edit_selection)
+        elif event.button() == QtCore.Qt.MouseButton.LeftButton:
+            QtCore.QTimer.singleShot(0, self._select_line_edit_text)
+
+    def stepBy(self, steps: int) -> None:
+        super().stepBy(steps)
+        if self._clicked_button:
+            QtCore.QTimer.singleShot(0, self._clear_line_edit_selection)
+
+    def _clear_line_edit_selection(self) -> None:
+        line = self.lineEdit()
+        if line is not None:
+            line.deselect()
+            line.clearFocus()
+        self.clearFocus()
+
+    def _select_line_edit_text(self) -> None:
+        line = self.lineEdit()
+        if line is not None:
+            line.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
+            line.selectAll()
+
+
+class PanelFrame(QtWidgets.QFrame):
+    """Header-strip panel wrapper used for top-level app sections."""
+
+    def __init__(self, title: str, content: QtWidgets.QWidget, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("panelFrame")
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        header = QtWidgets.QWidget(self)
+        header.setObjectName("panelFrameHeader")
+        header_layout = QtWidgets.QHBoxLayout(header)
+        header_layout.setContentsMargins(12, 6, 12, 6)
+        header_layout.setSpacing(0)
+        title_label = QtWidgets.QLabel(title, header)
+        title_label.setObjectName("panelFrameTitle")
+        header_layout.addWidget(title_label)
+        header_layout.addStretch(1)
+
+        body = QtWidgets.QWidget(self)
+        body.setObjectName("panelFrameBody")
+        body_layout = QtWidgets.QVBoxLayout(body)
+        body_layout.setContentsMargins(8, 8, 8, 8)
+        body_layout.setSpacing(0)
+        body_layout.addWidget(content)
+        self._body_layout = body_layout
+
+        root.addWidget(header)
+        root.addWidget(body, 1)
+
+    def set_body_margins(self, left: int, top: int, right: int, bottom: int) -> None:
+        self._body_layout.setContentsMargins(left, top, right, bottom)
+
+
+class ColorPickerButton(QtWidgets.QPushButton):
+    color_changed = QtCore.Signal(str)
+
+    def __init__(self, color_hex: str, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._color_hex = color_hex
+        self.clicked.connect(self._pick_color)
+        self._refresh_ui()
+
+    def color_hex(self) -> str:
+        return self._color_hex
+
+    def set_color_hex(self, color_hex: str) -> None:
+        c = QtGui.QColor(color_hex)
+        if not c.isValid():
+            return
+        self._color_hex = c.name()
+        self._refresh_ui()
+        self.color_changed.emit(self._color_hex)
+
+    def _refresh_ui(self) -> None:
+        self.setText(self._color_hex.upper())
+        fg = "#000000" if QtGui.QColor(self._color_hex).lightness() > 140 else "#ffffff"
+        self.setStyleSheet(
+            f"QPushButton {{ background-color: {self._color_hex}; color: {fg}; border: 1px solid #666; padding: 4px 8px; }}"
+        )
+
+    def _pick_color(self) -> None:
+        chosen = QtWidgets.QColorDialog.getColor(QtGui.QColor(self._color_hex), self, "Choose Color")
+        if chosen.isValid():
+            self.set_color_hex(chosen.name())
+
+
+class PreferencesDialog(QtWidgets.QDialog):
+    applied = QtCore.Signal(dict)
+    open_logs_requested = QtCore.Signal()
+    clear_logs_requested = QtCore.Signal()
+
+    def __init__(
+        self,
+        hbatch_path: str,
+        player_path: str,
+        theme: dict[str, str],
+        runtime_defaults: dict[str, Any],
+        logs_dir: str,
+        discover_hbatch_fn: Callable[[], str],
+        safe_message_fn: Callable[[QtWidgets.QWidget, str, str, str | None], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Preferences")
+        self.resize(760, 620)
+        self._discover_hbatch_fn = discover_hbatch_fn
+        self._safe_message_fn = safe_message_fn
+        self._theme_buttons: dict[str, ColorPickerButton] = {}
+        self._logs_dir = Path(logs_dir)
+        self._build_ui(hbatch_path, player_path, theme, runtime_defaults, logs_dir)
+
+    def _build_ui(self, hbatch_path: str, player_path: str, theme: dict[str, str], runtime_defaults: dict[str, Any], logs_dir: str) -> None:
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
+
+        scroll = QtWidgets.QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+
+        scroll_host = QtWidgets.QWidget()
+        scroll_host.setObjectName("transparentHost")
+        scroll_layout = QtWidgets.QVBoxLayout(scroll_host)
+        scroll_layout.setContentsMargins(0, 0, 8, 0)
+        scroll_layout.setSpacing(8)
+
+        settings_layout = QtWidgets.QVBoxLayout()
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setSpacing(6)
+
+        metric_labels = [
+            "Panel Gap",
+            "Selection Overlay Opacity",
+        ]
+        runtime_labels = [
+            "Chunking Enabled",
+            "Chunk Size",
+            "Retry Count",
+            "Retry Delay (s)",
+        ]
+        color_groups: list[list[tuple[str, str]]] = [
+            [
+                ("background", "Background"),
+                ("panel_bg", "Panel Background"),
+                ("text", "Text"),
+                ("button_bg", "Buttons"),
+                ("button_text", "Button Text"),
+                ("input_bg", "Inputs"),
+                ("input_text", "Input Text"),
+                ("text_selection_bg", "Text Select BG"),
+                ("text_selection_text", "Text Select Text"),
+            ],
+            [
+                ("table_base", "Table Base"),
+                ("table_alt", "Table Alternate"),
+                ("selection_row", "Selection Row"),
+                ("selection_row_alt", "Selection Row Alt"),
+            ],
+            [
+                ("queue_running", "Queue Running"),
+                ("queue_done", "Queue Done"),
+                ("queue_failed", "Queue Failed"),
+                ("lock_color", "Lock Color"),
+                ("progress_usd_build", "USD Build Line"),
+                ("progress_render", "Render Line"),
+            ],
+        ]
+        all_labels = [label for group in color_groups for _, label in group] + metric_labels + runtime_labels
+        label_width = max((self.fontMetrics().horizontalAdvance(label) for label in all_labels), default=0) + 12
+        control_min_width = 120
+        divider_width = 1
+
+        def _configure_pref_grid(grid: QtWidgets.QGridLayout, row_count: int) -> None:
+            grid.setContentsMargins(10, 10, 10, 10)
+            grid.setHorizontalSpacing(10)
+            grid.setVerticalSpacing(8)
+            grid.setColumnStretch(0, 0)
+            grid.setColumnStretch(1, 0)
+            grid.setColumnStretch(2, 1)
+            divider = QtWidgets.QFrame()
+            divider.setObjectName("toolbarSeparator")
+            divider.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+            divider.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
+            divider.setFixedWidth(divider_width)
+            grid.addWidget(divider, 0, 1, max(1, row_count), 1)
+
+        hbatch_row = QtWidgets.QHBoxLayout()
+        hbatch_row.setContentsMargins(0, 0, 0, 0)
+        hbatch_row.setSpacing(8)
+        self.hbatch_edit = QtWidgets.QLineEdit(hbatch_path)
+        self.hbatch_edit.setPlaceholderText("Path to hbatch.exe")
+        hbatch_row.addWidget(self.hbatch_edit, 1)
+        self.btn_browse_hbatch = QtWidgets.QPushButton("Browse...")
+        self.btn_browse_hbatch.clicked.connect(self._browse_hbatch)
+        hbatch_row.addWidget(self.btn_browse_hbatch)
+        self.btn_auto_find_hbatch = QtWidgets.QPushButton("Auto Find")
+        self.btn_auto_find_hbatch.clicked.connect(self._auto_find_hbatch)
+        hbatch_row.addWidget(self.btn_auto_find_hbatch)
+        hbatch_row.addStretch(0)
+        hbatch_row_host = QtWidgets.QWidget()
+        hbatch_row_host.setObjectName("transparentHost")
+        hbatch_row_host.setLayout(hbatch_row)
+        settings_layout.addWidget(hbatch_row_host)
+
+        status_row = QtWidgets.QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(6)
+        self.hbatch_status_prefix = QtWidgets.QLabel("Status:")
+        status_row.addWidget(self.hbatch_status_prefix)
+        self.hbatch_status_label = QtWidgets.QLabel()
+        self.hbatch_status_label.setMinimumWidth(120)
+        status_row.addWidget(self.hbatch_status_label)
+        status_row.addStretch(1)
+        status_row_host = QtWidgets.QWidget()
+        status_row_host.setObjectName("transparentHost")
+        status_row_host.setLayout(status_row)
+        settings_layout.addWidget(status_row_host)
+        self.hbatch_edit.textChanged.connect(self._update_hbatch_status_label)
+        self._update_hbatch_status_label()
+        settings_host = QtWidgets.QWidget()
+        settings_host.setObjectName("transparentHost")
+        settings_host.setLayout(settings_layout)
+        settings_panel = PanelFrame("Houdini Headless Executable - hbatch.exe", settings_host)
+
+        player_settings_layout = QtWidgets.QVBoxLayout()
+        player_settings_layout.setContentsMargins(0, 0, 0, 0)
+        player_settings_layout.setSpacing(6)
+        player_row = QtWidgets.QHBoxLayout()
+        player_row.setContentsMargins(0, 0, 0, 0)
+        player_row.setSpacing(8)
+        self.player_edit = QtWidgets.QLineEdit(player_path)
+        self.player_edit.setPlaceholderText("Path to player executable")
+        player_row.addWidget(self.player_edit, 1)
+        self.btn_browse_player = QtWidgets.QPushButton("Browse...")
+        self.btn_browse_player.clicked.connect(self._browse_player)
+        player_row.addWidget(self.btn_browse_player)
+        player_row.addStretch(0)
+        player_row_host = QtWidgets.QWidget()
+        player_row_host.setObjectName("transparentHost")
+        player_row_host.setLayout(player_row)
+        player_settings_layout.addWidget(player_row_host)
+        player_status_row = QtWidgets.QHBoxLayout()
+        player_status_row.setContentsMargins(0, 0, 0, 0)
+        player_status_row.setSpacing(6)
+        self.player_status_prefix = QtWidgets.QLabel("Status:")
+        player_status_row.addWidget(self.player_status_prefix)
+        self.player_status_label = QtWidgets.QLabel()
+        self.player_status_label.setMinimumWidth(120)
+        player_status_row.addWidget(self.player_status_label)
+        player_status_row.addStretch(1)
+        player_status_row_host = QtWidgets.QWidget()
+        player_status_row_host.setObjectName("transparentHost")
+        player_status_row_host.setLayout(player_status_row)
+        player_settings_layout.addWidget(player_status_row_host)
+        self.player_edit.textChanged.connect(self._update_player_status_label)
+        self._update_player_status_label()
+        player_settings_host = QtWidgets.QWidget()
+        player_settings_host.setObjectName("transparentHost")
+        player_settings_host.setLayout(player_settings_layout)
+        player_settings_panel = PanelFrame("Preview Player", player_settings_host)
+
+        runtime_host = QtWidgets.QWidget()
+        runtime_host.setObjectName("transparentHost")
+        runtime_layout = QtWidgets.QGridLayout(runtime_host)
+        _configure_pref_grid(runtime_layout, 4)
+        self.chk_default_chunking_enabled = QtWidgets.QCheckBox("Enabled")
+        self.chk_default_chunking_enabled.setChecked(bool(runtime_defaults.get("chunking_enabled", False)))
+        self.spin_default_chunk_size = CleanStepSpinBox()
+        self.spin_default_chunk_size.setRange(1, 100000)
+        self.spin_default_chunk_size.setValue(max(1, int(runtime_defaults.get("chunk_size", 10))))
+        self.spin_default_chunk_size.setMinimumWidth(control_min_width)
+        self.spin_default_chunk_size.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.spin_default_retry_count = CleanStepSpinBox()
+        self.spin_default_retry_count.setRange(0, 20)
+        self.spin_default_retry_count.setValue(max(0, int(runtime_defaults.get("retry_count", 1))))
+        self.spin_default_retry_count.setMinimumWidth(control_min_width)
+        self.spin_default_retry_count.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.spin_default_retry_delay = CleanStepSpinBox()
+        self.spin_default_retry_delay.setRange(0, 3600)
+        self.spin_default_retry_delay.setValue(max(0, int(runtime_defaults.get("retry_delay", 5))))
+        self.spin_default_retry_delay.setMinimumWidth(control_min_width)
+        self.spin_default_retry_delay.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+
+        def _runtime_label(text: str) -> QtWidgets.QLabel:
+            label = QtWidgets.QLabel(text)
+            label.setObjectName("parameterLabel")
+            label.setFixedWidth(label_width)
+            label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            return label
+
+        runtime_layout.addWidget(_runtime_label("Chunking Enabled"), 0, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        runtime_layout.addWidget(self.chk_default_chunking_enabled, 0, 2, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        runtime_layout.addWidget(_runtime_label("Chunk Size"), 1, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        runtime_layout.addWidget(self.spin_default_chunk_size, 1, 2)
+        runtime_layout.addWidget(_runtime_label("Retry Count"), 2, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        runtime_layout.addWidget(self.spin_default_retry_count, 2, 2)
+        runtime_layout.addWidget(_runtime_label("Retry Delay (s)"), 3, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        runtime_layout.addWidget(self.spin_default_retry_delay, 3, 2)
+        runtime_panel = PanelFrame("Queue Runtime Defaults", runtime_host)
+
+        logs_host = QtWidgets.QWidget()
+        logs_host.setObjectName("transparentHost")
+        logs_layout = QtWidgets.QVBoxLayout(logs_host)
+        logs_layout.setContentsMargins(10, 10, 10, 10)
+        logs_layout.setSpacing(8)
+        logs_path_label = QtWidgets.QLabel("Folder")
+        logs_path_label.setObjectName("parameterLabel")
+        self.logs_dir_value = QtWidgets.QLineEdit(logs_dir)
+        self.logs_dir_value.setReadOnly(True)
+        self.logs_dir_value.setMinimumWidth(control_min_width)
+        logs_path_row = QtWidgets.QHBoxLayout()
+        logs_path_row.setContentsMargins(0, 0, 0, 0)
+        logs_path_row.setSpacing(10)
+        logs_path_row.addWidget(logs_path_label)
+        logs_path_row.addWidget(self.logs_dir_value, 1)
+        logs_layout.addLayout(logs_path_row)
+        self.logs_summary_label = QtWidgets.QLabel()
+        self.logs_summary_label.setWordWrap(True)
+        logs_layout.addWidget(self.logs_summary_label)
+        logs_buttons = QtWidgets.QHBoxLayout()
+        logs_buttons.setContentsMargins(0, 0, 0, 0)
+        logs_buttons.setSpacing(8)
+        self.btn_open_logs_folder = QtWidgets.QPushButton("Open Folder")
+        self.btn_open_logs_folder.clicked.connect(self.open_logs_requested.emit)
+        logs_buttons.addWidget(self.btn_open_logs_folder)
+        self.btn_clear_logs = QtWidgets.QPushButton("Delete Log Files")
+        self.btn_clear_logs.clicked.connect(self.clear_logs_requested.emit)
+        logs_buttons.addWidget(self.btn_clear_logs)
+        logs_buttons.addStretch(1)
+        logs_layout.addLayout(logs_buttons)
+        self.refresh_logs_summary()
+        logs_panel = PanelFrame("Logs", logs_host)
+
+        theme_host = QtWidgets.QWidget()
+        theme_host.setObjectName("transparentHost")
+        colors_root = QtWidgets.QVBoxLayout(theme_host)
+        colors_root.setContentsMargins(0, 0, 0, 0)
+        colors_root.setSpacing(8)
+        def _add_color_group(title: str, fields: list[tuple[str, str]]) -> None:
+            grp = QtWidgets.QGroupBox(title)
+            gl = QtWidgets.QGridLayout(grp)
+            _configure_pref_grid(gl, len(fields))
+            for row, (key, label) in enumerate(fields):
+                lbl = QtWidgets.QLabel(label)
+                lbl.setObjectName("parameterLabel")
+                lbl.setFixedWidth(label_width)
+                lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                gl.addWidget(lbl, row, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+                btn = ColorPickerButton(str(theme.get(key, DEFAULT_THEME[key])))
+                btn.setMinimumWidth(control_min_width)
+                btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+                self._theme_buttons[key] = btn
+                gl.addWidget(btn, row, 2)
+            colors_root.addWidget(grp)
+
+        _add_color_group(
+            "General",
+            color_groups[0],
+        )
+        _add_color_group(
+            "Table / Selection",
+            color_groups[1],
+        )
+        _add_color_group(
+            "Queue / Indicators",
+            color_groups[2],
+        )
+
+        metrics_box = QtWidgets.QGroupBox("Theme Layout")
+        metrics_grid = QtWidgets.QGridLayout(metrics_box)
+        _configure_pref_grid(metrics_grid, 2)
+        self.panel_gap_spin = CleanStepSpinBox()
+        self.panel_gap_spin.setRange(2, 24)
+        self.panel_gap_spin.setValue(int(theme.get("panel_gap", DEFAULT_THEME["panel_gap"])))
+        self.panel_gap_spin.setMinimumWidth(control_min_width)
+        self.panel_gap_spin.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        panel_gap_label = QtWidgets.QLabel("Panel Gap")
+        panel_gap_label.setObjectName("parameterLabel")
+        panel_gap_label.setFixedWidth(label_width)
+        panel_gap_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        metrics_grid.addWidget(panel_gap_label, 0, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        metrics_grid.addWidget(self.panel_gap_spin, 0, 2)
+        self.selection_overlay_opacity_spin = CleanStepSpinBox()
+        self.selection_overlay_opacity_spin.setRange(0, 255)
+        self.selection_overlay_opacity_spin.setValue(
+            int(theme.get("selection_overlay_opacity", DEFAULT_THEME["selection_overlay_opacity"]))
+        )
+        self.selection_overlay_opacity_spin.setMinimumWidth(control_min_width)
+        self.selection_overlay_opacity_spin.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        overlay_label = QtWidgets.QLabel("Selection Overlay Opacity")
+        overlay_label.setObjectName("parameterLabel")
+        overlay_label.setFixedWidth(label_width)
+        overlay_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        metrics_grid.addWidget(overlay_label, 1, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        metrics_grid.addWidget(self.selection_overlay_opacity_spin, 1, 2)
+        colors_root.addWidget(metrics_box)
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+        self.btn_reset_theme = QtWidgets.QPushButton("Reset Theme")
+        self.btn_reset_theme.clicked.connect(self._reset_theme)
+        buttons.addWidget(self.btn_reset_theme)
+        self.btn_apply = QtWidgets.QPushButton("Apply")
+        self.btn_apply.clicked.connect(self._emit_apply)
+        buttons.addWidget(self.btn_apply)
+        self.btn_close = QtWidgets.QPushButton("Close")
+        self.btn_close.clicked.connect(self.accept)
+        buttons.addWidget(self.btn_close)
+        buttons_host = QtWidgets.QWidget()
+        buttons_host.setObjectName("transparentHost")
+        buttons_host.setLayout(buttons)
+        colors_root.addStretch(1)
+        colors_root.addWidget(buttons_host)
+        theme_panel = PanelFrame("Theme", theme_host)
+
+        scroll_layout.addWidget(settings_panel)
+        scroll_layout.addWidget(player_settings_panel)
+        scroll_layout.addWidget(runtime_panel)
+        scroll_layout.addWidget(logs_panel)
+        scroll_layout.addWidget(theme_panel)
+        scroll_layout.addStretch(1)
+
+        scroll.setWidget(scroll_host)
+        root.addWidget(scroll, 1)
+
+    def _browse_hbatch(self) -> None:
+        current = self.hbatch_edit.text().strip()
+        start_dir = str(Path(current).parent) if current else r"C:\Program Files\Side Effects Software"
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select hbatch.exe",
+            start_dir,
+            "hbatch.exe (hbatch.exe);;Executables (*.exe);;All Files (*.*)",
+        )
+        if path:
+            self.hbatch_edit.setText(path)
+
+    def _auto_find_hbatch(self) -> None:
+        found = self._discover_hbatch_fn()
+        if found:
+            self.hbatch_edit.setText(found)
+        else:
+            self._safe_message_fn(self, "hbatch Not Found", "Could not auto-discover hbatch.exe.", None)
+
+    def _browse_player(self) -> None:
+        current = self.player_edit.text().strip()
+        start_dir = str(Path(current).parent) if current else str(Path.home())
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select Player Executable",
+            start_dir,
+            "Executables (*.exe);;All Files (*.*)",
+        )
+        if path:
+            self.player_edit.setText(path)
+
+    def _update_hbatch_status_label(self) -> None:
+        path = self.hbatch_edit.text().strip()
+        if path and Path(path).exists():
+            self.hbatch_status_label.setText("<span style='color:#2e7d32; font-weight:600;'>Exists</span>")
+        elif path:
+            self.hbatch_status_label.setText("<span style='color:#b71c1c; font-weight:600;'>Missing</span>")
+        else:
+            self.hbatch_status_label.setText("<span style='color:#b71c1c; font-weight:600;'>Not Configured</span>")
+
+    def _update_player_status_label(self) -> None:
+        path = self.player_edit.text().strip()
+        if path and Path(path).exists():
+            self.player_status_label.setText("<span style='color:#2e7d32; font-weight:600;'>Exists</span>")
+        elif path:
+            self.player_status_label.setText("<span style='color:#b71c1c; font-weight:600;'>Missing</span>")
+        else:
+            self.player_status_label.setText("<span style='color:#b71c1c; font-weight:600;'>Not Configured</span>")
+
+    def _reset_theme(self) -> None:
+        for key, btn in self._theme_buttons.items():
+            btn.set_color_hex(DEFAULT_THEME[key])
+        self.panel_gap_spin.setValue(int(DEFAULT_THEME.get("panel_gap", 6)))
+        self.selection_overlay_opacity_spin.setValue(int(DEFAULT_THEME.get("selection_overlay_opacity", 95)))
+
+    def refresh_logs_summary(self) -> None:
+        try:
+            self._logs_dir.mkdir(parents=True, exist_ok=True)
+            log_paths = [p for p in self._logs_dir.glob("*.log") if p.is_file()]
+        except Exception as exc:
+            self.logs_summary_label.setText(f"Summary unavailable: {exc}")
+            return
+        total_bytes = 0
+        for path in log_paths:
+            try:
+                total_bytes += path.stat().st_size
+            except Exception:
+                continue
+        self.logs_summary_label.setText(
+            f"{len(log_paths)} log file(s) in folder, total size {self._format_bytes(total_bytes)}."
+        )
+
+    @staticmethod
+    def _format_bytes(size: int) -> str:
+        if size <= 0:
+            return "0 B"
+        units = ["B", "KB", "MB", "GB", "TB"]
+        power = min(int(math.log(size, 1024)), len(units) - 1)
+        scaled = size / (1024 ** power)
+        if power == 0:
+            return f"{int(scaled)} {units[power]}"
+        return f"{scaled:.1f} {units[power]}"
+
+    def _emit_apply(self) -> None:
+        self.applied.emit(self.values())
+
+    def values(self) -> dict[str, Any]:
+        theme = {key: btn.color_hex() for key, btn in self._theme_buttons.items()}
+        theme["panel_gap"] = int(self.panel_gap_spin.value())
+        theme["selection_overlay_opacity"] = int(self.selection_overlay_opacity_spin.value())
+        return {
+            "hbatch_path": self.hbatch_edit.text().strip(),
+            "player_path": self.player_edit.text().strip(),
+            "runtime_defaults": {
+                "chunking_enabled": bool(self.chk_default_chunking_enabled.isChecked()),
+                "chunk_size": int(self.spin_default_chunk_size.value()),
+                "retry_count": int(self.spin_default_retry_count.value()),
+                "retry_delay": int(self.spin_default_retry_delay.value()),
+            },
+            "theme": theme,
+        }
+
+
+class RopListWidget(QtWidgets.QListWidget):
+    """ROP list with persistent row striping, including empty area."""
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        super().paintEvent(event)
+        vp = self.viewport()
+        if vp is None:
+            return
+
+        painter = QtGui.QPainter(vp)
+        try:
+            rect = vp.rect()
+            if rect.height() <= 0 or rect.width() <= 0:
+                return
+
+            base = QtGui.QColor("#353535")
+            alt = QtGui.QColor("#383838")
+            hinted = self.sizeHintForRow(0)
+            row_h = int(hinted) if int(hinted) > 0 else max(24, self.fontMetrics().height() + 14)
+
+            start_y = 0
+            if self.count() > 0:
+                last = self.item(self.count() - 1)
+                last_rect = self.visualItemRect(last)
+                start_y = max(0, last_rect.bottom() + 1)
+                row_index = self.count()
+            else:
+                row_index = 0
+
+            y = start_y
+            while y < rect.height():
+                stripe = alt if (row_index % 2) else base
+                painter.fillRect(QtCore.QRect(0, y, rect.width(), min(row_h, rect.height() - y)), stripe)
+                y += row_h
+                row_index += 1
+        finally:
+            painter.end()
+
+
+class AddJobPanel(QtWidgets.QGroupBox):
+    add_job_requested = QtCore.Signal(dict)
+    scan_requested = QtCore.Signal(dict)
+
+    def __init__(self, config: Any, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__("Create Job", parent)
+        self.config = config
+        self._rop_scan_meta: dict[str, dict[str, Any]] = {}
+        self._ui_running = False
+        self._ui_scan_in_progress = False
+        self._build_ui()
+        self._load_recents()
+
+    def _build_ui(self) -> None:
+        layout = QtWidgets.QGridLayout(self)
+        layout.setColumnStretch(1, 1)
+        layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop | QtCore.Qt.AlignmentFlag.AlignLeft)
+
+        row = 0
+        layout.addWidget(QtWidgets.QLabel("HIP File"), row, 0)
+        row += 1
+        self.hip_combo = QtWidgets.QComboBox()
+        self.hip_combo.setEditable(True)
+        self.hip_combo.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
+        layout.addWidget(self.hip_combo, row, 0, 1, 3)
+        row += 1
+
+        hip_actions = QtWidgets.QHBoxLayout()
+        hip_actions.setContentsMargins(0, 0, 0, 0)
+        self.btn_browse_hip = QtWidgets.QPushButton("Browse...")
+        self.btn_browse_hip.clicked.connect(self._browse_hip)
+        hip_actions.addWidget(self.btn_browse_hip)
+        self.btn_scan_out = QtWidgets.QPushButton("Reload")
+        self.btn_scan_out.clicked.connect(self._request_scan)
+        hip_actions.addWidget(self.btn_scan_out)
+        hip_actions.addStretch(1)
+        hip_actions_host = QtWidgets.QWidget()
+        hip_actions_host.setObjectName("transparentHost")
+        hip_actions_host.setLayout(hip_actions)
+        layout.addWidget(hip_actions_host, row, 0, 1, 3)
+        row += 1
+
+        self.rop_panel = QtWidgets.QFrame()
+        self.rop_panel.setObjectName("ropPanel")
+        rop_panel_layout = QtWidgets.QVBoxLayout(self.rop_panel)
+        rop_panel_layout.setContentsMargins(0, 0, 0, 0)
+        rop_panel_layout.setSpacing(0)
+
+        rop_header = QtWidgets.QWidget()
+        rop_header.setObjectName("ropPanelHeader")
+        rop_header_layout = QtWidgets.QHBoxLayout(rop_header)
+        rop_header_layout.setContentsMargins(10, 6, 10, 6)
+        rop_header_layout.setSpacing(8)
+        rop_title = QtWidgets.QLabel("ROPs")
+        rop_title.setObjectName("ropPanelTitle")
+        rop_header_layout.addWidget(rop_title)
+
+        self.chk_scan_out = QtWidgets.QCheckBox("/out")
+        self.chk_scan_stage = QtWidgets.QCheckBox("/stage")
+        self.chk_scan_out.setChecked(True)
+        self.chk_scan_stage.setChecked(True)
+        rop_header_layout.addWidget(self.chk_scan_out)
+        rop_header_layout.addWidget(self.chk_scan_stage)
+        rop_header_layout.addStretch(1)
+        rop_panel_layout.addWidget(rop_header)
+
+        self.rop_list = RopListWidget()
+        self.rop_list.setObjectName("ropList")
+        self.rop_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.rop_list.itemSelectionChanged.connect(self._refresh_override_warning)
+        self.rop_list.setMinimumHeight(160)
+        self.rop_list.setAlternatingRowColors(True)
+        rop_panel_layout.addWidget(self.rop_list, 1)
+
+        layout.addWidget(self.rop_panel, row, 0, 1, 3)
+        row += 1
+
+        layout.addWidget(QtWidgets.QLabel("Name (Optional)"), row, 0)
+        self.name_edit = QtWidgets.QLineEdit()
+        self.name_edit.setPlaceholderText("Defaults to hip filename + rop node")
+        layout.addWidget(self.name_edit, row, 1, 1, 2)
+        row += 1
+
+        self.frames_group = QtWidgets.QGroupBox("Frames")
+        frames_layout = QtWidgets.QGridLayout(self.frames_group)
+        frames_layout.setColumnStretch(1, 1)
+
+        frame_mode_row = QtWidgets.QHBoxLayout()
+        frame_mode_row.setContentsMargins(0, 0, 0, 0)
+        self.radio_use_rop = QtWidgets.QRadioButton("Use from ROP")
+        self.radio_override = QtWidgets.QRadioButton("Override")
+        self.radio_use_rop.setChecked(True)
+        self.radio_use_rop.toggled.connect(self._update_frame_controls_enabled)
+        self.radio_override.toggled.connect(self._refresh_override_warning)
+        frame_mode_row.addWidget(self.radio_use_rop)
+        frame_mode_row.addWidget(self.radio_override)
+        frame_mode_row.addStretch(1)
+        frame_mode_host = QtWidgets.QWidget()
+        frame_mode_host.setLayout(frame_mode_row)
+        frames_layout.addWidget(frame_mode_host, 0, 0, 1, 2)
+
+        self.override_warning_frame = QtWidgets.QFrame()
+        self.override_warning_frame.setObjectName("overrideStrictWarning")
+        self.override_warning_frame.setStyleSheet(
+            "#overrideStrictWarning { border: none; border-radius: 8px; background: #6b3f00; }"
+        )
+        warning_layout = QtWidgets.QHBoxLayout(self.override_warning_frame)
+        warning_layout.setContentsMargins(12, 8, 12, 8)
+        self.override_warning_label = QtWidgets.QLabel("Cannot override! ROP set to \"Strict\" frame range.")
+        self.override_warning_label.setStyleSheet("background: transparent;")
+        self.override_warning_label.setWordWrap(True)
+        warning_layout.addWidget(self.override_warning_label)
+        self.override_warning_frame.setVisible(False)
+        frames_layout.addWidget(self.override_warning_frame, 1, 0, 1, 2)
+        row += 1
+
+        self.start_spin = CleanStepSpinBox()
+        self.end_spin = CleanStepSpinBox()
+        self.step_spin = CleanStepSpinBox()
+        for spin in (self.start_spin, self.end_spin):
+            spin.setRange(-1000000, 10000000)
+        self.step_spin.setRange(1, 1000000)
+        self.start_spin.setValue(1)
+        self.end_spin.setValue(1)
+        self.step_spin.setValue(1)
+        frames_layout.addWidget(QtWidgets.QLabel("Start"), 2, 0)
+        frames_layout.addWidget(self.start_spin, 2, 1)
+        frames_layout.addWidget(QtWidgets.QLabel("End"), 3, 0)
+        frames_layout.addWidget(self.end_spin, 3, 1)
+        frames_layout.addWidget(QtWidgets.QLabel("Step"), 4, 0)
+        frames_layout.addWidget(self.step_spin, 4, 1)
+
+        layout.addWidget(self.frames_group, row, 0, 1, 3)
+        self.frames_group.setVisible(False)
+        row += 1
+
+        self.btn_add_queue = QtWidgets.QPushButton("Add To Queue")
+        self.btn_add_queue.clicked.connect(self._emit_add_job)
+        layout.addWidget(self.btn_add_queue, row, 0, 1, 3)
+        row += 1
+        layout.setRowStretch(row, 1)
+
+        self._update_frame_controls_enabled()
+
+    def _load_recents(self) -> None:
+        for hip in self.config.get("recent_hip_paths", []):
+            self.hip_combo.addItem(str(hip))
+
+    def _browse_hip(self) -> None:
+        start_dir = self.config.get("last_hip_dir", "") or str(Path.home())
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select Houdini HIP File",
+            start_dir,
+            "Houdini Files (*.hip *.hiplc *.hipnc);;All Files (*.*)",
+        )
+        if not path:
+            return
+        self.load_hip_path(path, request_scan=True)
+
+    def load_hip_path(self, path: str, *, request_scan: bool = True) -> None:
+        text = str(path or "").strip()
+        if not text:
+            return
+        self.hip_combo.setEditText(text)
+        self.config.set("last_hip_dir", str(Path(text).parent))
+        if request_scan and not self._ui_scan_in_progress:
+            self._request_scan(text)
+
+    def _request_scan(self, hip_path_override: str | None = None) -> None:
+        self.scan_requested.emit(
+            {
+                "hip_path": str(hip_path_override or self.hip_combo.currentText()).strip(),
+                "scan_out": self.chk_scan_out.isChecked(),
+                "scan_stage": self.chk_scan_stage.isChecked(),
+            }
+        )
+
+    def _update_frame_controls_enabled(self) -> None:
+        enabled = self.radio_override.isChecked() and not self._is_override_strict_conflict()
+        for w in (self.start_spin, self.end_spin, self.step_spin):
+            w.setEnabled(enabled)
+
+    def _emit_add_job(self) -> None:
+        selected_rop_paths = self.selected_rop_paths()
+        if not selected_rop_paths:
+            return
+        payload = {
+            "hip_path": self.hip_combo.currentText().strip(),
+            "rop_path": selected_rop_paths[0],
+            "rop_paths": selected_rop_paths,
+            "name": self.name_edit.text().strip(),
+            "frame_range_mode": "use_rop",
+            "start_frame": None,
+            "end_frame": None,
+            "step": None,
+        }
+        self.add_job_requested.emit(payload)
+
+    def set_enabled_for_run_state(self, running: bool, scan_in_progress: bool) -> None:
+        self._ui_running = bool(running)
+        self._ui_scan_in_progress = bool(scan_in_progress)
+        self.btn_add_queue.setEnabled(self._can_add_job_now())
+        self.btn_browse_hip.setEnabled(not scan_in_progress)
+        self.btn_scan_out.setEnabled(not scan_in_progress)
+        self.hip_combo.setEnabled(not scan_in_progress)
+        self.chk_scan_out.setEnabled(not scan_in_progress)
+        self.chk_scan_stage.setEnabled(not scan_in_progress)
+        self.rop_list.setEnabled(not scan_in_progress)
+        self.name_edit.setEnabled(not scan_in_progress)
+        self.radio_use_rop.setEnabled(not scan_in_progress)
+        self.radio_override.setEnabled(not scan_in_progress)
+        self._update_frame_controls_enabled()
+        self._refresh_override_warning()
+        if scan_in_progress:
+            for w in (self.start_spin, self.end_spin, self.step_spin):
+                w.setEnabled(False)
+
+    def current_rop_path(self) -> str:
+        paths = self.selected_rop_paths()
+        return paths[0] if paths else ""
+
+    def selected_rop_paths(self) -> list[str]:
+        result: list[str] = []
+        for item in self.rop_list.selectedItems():
+            path = str(item.data(QtCore.Qt.ItemDataRole.UserRole) or item.text()).strip()
+            if path:
+                result.append(path)
+        return result
+
+    def rop_strict_frame_range_for_path(self, rop_path: str) -> bool:
+        rec = self._rop_scan_meta.get((rop_path or "").strip())
+        return bool(rec and rec.get("strict_frame_range"))
+
+    def rop_output_path_for_path(self, rop_path: str) -> str:
+        rec = self._rop_scan_meta.get((rop_path or "").strip())
+        return str((rec or {}).get("output_path", "") or "")
+
+    def rop_range_info_for_path(self, rop_path: str) -> tuple[float | None, float | None, float | None]:
+        rec = self._rop_scan_meta.get((rop_path or "").strip()) or {}
+        return (
+            rec.get("runtime_start_frame"),
+            rec.get("runtime_end_frame"),
+            rec.get("runtime_step"),
+        )
+
+    def set_scanned_rops(self, rop_records: list[dict[str, Any]]) -> None:
+        selected_before = set(self.selected_rop_paths())
+        for rec in rop_records:
+            path_key = str(rec.get("path", "")).strip()
+            if path_key:
+                self._rop_scan_meta[path_key] = dict(rec)
+        self.rop_list.blockSignals(True)
+        self.rop_list.clear()
+        first_item: QtWidgets.QListWidgetItem | None = None
+        for rec in rop_records:
+            path = str(rec.get("path", "")).strip()
+            if not path:
+                continue
+            item = QtWidgets.QListWidgetItem(path)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, path)
+            self.rop_list.addItem(item)
+            if path in selected_before:
+                item.setSelected(True)
+            if first_item is None:
+                first_item = item
+        if self.rop_list.selectedItems() == [] and first_item is not None:
+            first_item.setSelected(True)
+        self.rop_list.blockSignals(False)
+        self._refresh_override_warning()
+
+    def _current_rop_scan_record(self) -> dict[str, Any] | None:
+        paths = self.selected_rop_paths()
+        if not paths:
+            return None
+        return self._rop_scan_meta.get(paths[0])
+
+    def current_rop_is_strict_frame_range(self) -> bool:
+        return any(self.rop_strict_frame_range_for_path(p) for p in self.selected_rop_paths())
+
+    def set_rop_strict_frame_range_hint(self, rop_path: str, is_strict: bool) -> None:
+        rop_path = (rop_path or "").strip()
+        if not rop_path:
+            return
+        rec = dict(self._rop_scan_meta.get(rop_path, {}))
+        rec["path"] = rop_path
+        rec["strict_frame_range"] = bool(is_strict)
+        self._rop_scan_meta[rop_path] = rec
+        if rop_path in self.selected_rop_paths():
+            self._refresh_override_warning()
+
+    def set_rop_output_path_hint(self, rop_path: str, output_path: str) -> None:
+        rop_path = (rop_path or "").strip()
+        if not rop_path:
+            return
+        rec = dict(self._rop_scan_meta.get(rop_path, {}))
+        rec["path"] = rop_path
+        rec["output_path"] = str(output_path or "")
+        self._rop_scan_meta[rop_path] = rec
+
+    def set_rop_range_hint(
+        self,
+        rop_path: str,
+        start_frame: float | None,
+        end_frame: float | None,
+        step: float | None,
+    ) -> None:
+        rop_path = (rop_path or "").strip()
+        if not rop_path:
+            return
+        rec = dict(self._rop_scan_meta.get(rop_path, {}))
+        rec["path"] = rop_path
+        rec["runtime_start_frame"] = start_frame
+        rec["runtime_end_frame"] = end_frame
+        rec["runtime_step"] = step
+        self._rop_scan_meta[rop_path] = rec
+
+    def _refresh_override_warning(self, *_args: object) -> None:
+        show = self._is_override_strict_conflict()
+        self.override_warning_frame.setVisible(show)
+        self._update_frame_controls_enabled()
+        self.btn_add_queue.setEnabled(self._can_add_job_now())
+
+    def _is_override_strict_conflict(self) -> bool:
+        return self.radio_override.isChecked() and self.current_rop_is_strict_frame_range()
+
+    def _can_add_job_now(self) -> bool:
+        if self._ui_scan_in_progress:
+            return False
+        if not self.selected_rop_paths():
+            return False
+        return True
+
+    def push_recents_from_job(self, hip_path: str, rop_path: str) -> None:
+        self.config.push_recent("recent_hip_paths", hip_path)
+        self.config.push_recent("recent_rop_paths", rop_path)
+        self._refresh_combo_from_config(self.hip_combo, self.config.get("recent_hip_paths", []))
+
+    @staticmethod
+    def _refresh_combo_from_config(combo: QtWidgets.QComboBox, items: list[str]) -> None:
+        current = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems([str(i) for i in items])
+        combo.setEditText(current)
+        combo.blockSignals(False)
+
+
+class QueueTableWidget(QtWidgets.QTableWidget):
+    FRAME_HANDLING_COLUMN = 5
+    FRAME_HANDLING_OPTIONS = [
+        "Render Missing",
+        "Render From First Missing",
+        "Overwrite",
+    ]
+
+    row_reordered_by_drag = QtCore.Signal(int, int)
+    rows_reordered_by_drag = QtCore.Signal(list, int)
+    frame_handling_chosen = QtCore.Signal(int, str)
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.selection_row_color = QtGui.QColor(DEFAULT_THEME["selection_row"])
+        self.selection_row_alt_color = QtGui.QColor(DEFAULT_THEME["selection_row_alt"])
+        self.selection_overlay_opacity = int(DEFAULT_THEME.get("selection_overlay_opacity", 95))
+        self.stats_split_after_visual_index: int | None = None
+        self.stats_split_line_color = QtGui.QColor("#5a5a5a")
+        self.progress_usd_build_color = QtGui.QColor(DEFAULT_THEME.get("progress_usd_build", "#11b7b7"))
+        self.progress_render_color = QtGui.QColor(DEFAULT_THEME.get("progress_render", "#2fbf4a"))
+        self.combo_bg_color = QtGui.QColor(DEFAULT_THEME.get("button_bg", "#3a3a3a"))
+        self.combo_text_color = QtGui.QColor(DEFAULT_THEME.get("button_text", "#ffffff"))
+        self.combo_border_color = QtGui.QColor("#555555")
+        self._suppress_drag_select_until_release = False
+        self._pending_preserved_drag_rows: list[int] = []
+        self._pending_preserved_drag_pos: QtCore.QPoint | None = None
+        self._drop_indicator_row: int | None = None
+        self.viewport().installEventFilter(self)
+
+    def clear_frame_handling_interaction_state(self) -> None:
+        self._suppress_drag_select_until_release = False
+
+    def _clear_drop_indicator(self) -> None:
+        if self._drop_indicator_row is None:
+            return
+        self._drop_indicator_row = None
+        self.viewport().update()
+
+    def _drop_target_row_from_y(self, y: int) -> int:
+        if self.rowCount() <= 0:
+            return 0
+        row = self.rowAt(y)
+        if row < 0:
+            last = self.rowCount() - 1
+            last_rect = self._row_visual_rect(last)
+            if not last_rect.isValid():
+                return self.rowCount()
+            return self.rowCount() if y > last_rect.bottom() else 0
+        rect = self._row_visual_rect(row)
+        if rect.isValid() and y > rect.center().y():
+            return row + 1
+        return row
+
+    def _set_drop_indicator_from_pos(self, pos: QtCore.QPoint) -> None:
+        new_row = self._drop_target_row_from_y(pos.y())
+        if new_row != self._drop_indicator_row:
+            self._drop_indicator_row = new_row
+            self.viewport().update()
+
+    def _viewport_drag_pos(self) -> QtCore.QPoint:
+        return self.viewport().mapFromGlobal(QtGui.QCursor.pos())
+
+    def _first_visible_column(self) -> int:
+        for col in range(self.columnCount()):
+            if not self.isColumnHidden(col):
+                return col
+        return 0
+
+    def _row_visual_rect(self, row: int) -> QtCore.QRect:
+        if not (0 <= row < self.rowCount()):
+            return QtCore.QRect()
+        col = self._first_visible_column()
+        return self.visualRect(self.model().index(row, col))
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if watched is self.viewport():
+            et = event.type()
+            if et in {
+                QtCore.QEvent.Type.DragEnter,
+                QtCore.QEvent.Type.DragMove,
+                QtCore.QEvent.Type.Drop,
+            } and hasattr(event, "position"):
+                try:
+                    self._set_drop_indicator_from_pos(event.position().toPoint())
+                except Exception:
+                    pass
+            elif et == QtCore.QEvent.Type.DragLeave:
+                self._clear_drop_indicator()
+        return super().eventFilter(watched, event)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        super().paintEvent(event)
+        # Draw the stats split divider at all times.
+        painter = QtGui.QPainter(self.viewport())
+        try:
+            if self.stats_split_after_visual_index is not None and self.horizontalHeader() is not None:
+                visual_idx = int(self.stats_split_after_visual_index)
+                header = self.horizontalHeader()
+                if 0 <= visual_idx < self.columnCount():
+                    logical = header.logicalIndex(visual_idx)
+                    if 0 <= logical < self.columnCount() and not self.isColumnHidden(logical):
+                        x = self.columnViewportPosition(logical) + self.columnWidth(logical)
+                        if 0 <= x <= self.viewport().width():
+                            split_pen = QtGui.QPen(self.stats_split_line_color)
+                            split_pen.setWidth(1)
+                            painter.setPen(split_pen)
+                            painter.drawLine(x, 0, x, self.viewport().height())
+                if self._drop_indicator_row is not None:
+                    row = max(0, min(self._drop_indicator_row, self.rowCount()))
+                    if row >= self.rowCount():
+                        if self.rowCount() > 0:
+                            last_rect = self._row_visual_rect(self.rowCount() - 1)
+                            y = last_rect.bottom() + 1
+                        else:
+                            y = 0
+                    else:
+                        row_rect = self._row_visual_rect(row)
+                        y = row_rect.top()
+                    pen = QtGui.QPen(self.selection_row_color)
+                    pen.setWidth(2)
+                    painter.setPen(pen)
+                    painter.drawLine(0, y, self.viewport().width(), y)
+        finally:
+            painter.end()
+
+    def _selection_model(self) -> QtCore.QItemSelectionModel | None:
+        return self.selectionModel()
+
+    def _selected_row_count(self) -> int:
+        sm = self._selection_model()
+        return len(sm.selectedRows()) if sm is not None else 0
+
+    def _is_row_selected(self, row: int) -> bool:
+        sm = self._selection_model()
+        return bool(sm is not None and sm.isRowSelected(row, QtCore.QModelIndex()))
+
+    def _set_current_no_update(self, idx: QtCore.QModelIndex) -> None:
+        sm = self._selection_model()
+        if sm is None:
+            return
+        sm.setCurrentIndex(idx, QtCore.QItemSelectionModel.SelectionFlag.NoUpdate)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._pending_preserved_drag_rows = []
+            self._pending_preserved_drag_pos = None
+            pos = event.position().toPoint()
+            idx = self.indexAt(pos)
+            if not idx.isValid():
+                self.clearSelection()
+                self.setCurrentCell(-1, -1)
+                event.accept()
+                return
+            if idx.column() == self.FRAME_HANDLING_COLUMN:
+                self._show_frame_handling_popup(idx)
+                event.accept()
+                return
+            mods = QtWidgets.QApplication.keyboardModifiers()
+            if mods == QtCore.Qt.KeyboardModifier.NoModifier:
+                if self._is_row_selected(idx.row()):
+                    if self._selected_row_count() > 1:
+                        # Preserve multi-selection and defer drag start until move threshold.
+                        self._pending_preserved_drag_rows = [r.row() for r in self.selectionModel().selectedRows()]
+                        self._pending_preserved_drag_pos = pos
+                        self._set_current_no_update(idx)
+                        event.accept()
+                        return
+        super().mousePressEvent(event)
+
+    def _show_frame_handling_popup(self, idx: QtCore.QModelIndex) -> None:
+        if not idx.isValid() or idx.column() != self.FRAME_HANDLING_COLUMN:
+            return
+        current_text = str(idx.data(QtCore.Qt.ItemDataRole.DisplayRole) or "").strip()
+        menu = QtWidgets.QMenu(self)
+        menu.setObjectName("frameHandlingMenu")
+        action_group = QtGui.QActionGroup(menu)
+        action_group.setExclusive(True)
+        for label in self.FRAME_HANDLING_OPTIONS:
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(label == current_text)
+            action_group.addAction(act)
+        rect = self.visualRect(idx)
+        chosen = menu.exec(self.viewport().mapToGlobal(rect.bottomLeft()))
+        if chosen is not None:
+            self.frame_handling_chosen.emit(idx.row(), chosen.text())
+        self.clear_frame_handling_interaction_state()
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._suppress_drag_select_until_release and (event.buttons() & QtCore.Qt.MouseButton.LeftButton):
+            event.accept()
+            return
+        if (
+            self._pending_preserved_drag_rows
+            and self._pending_preserved_drag_pos is not None
+            and (event.buttons() & QtCore.Qt.MouseButton.LeftButton)
+        ):
+            if (event.position().toPoint() - self._pending_preserved_drag_pos).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
+                self.startDrag(QtCore.Qt.DropAction.MoveAction)
+                self._pending_preserved_drag_rows = []
+                self._pending_preserved_drag_pos = None
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        try:
+            if event.button() == QtCore.Qt.MouseButton.LeftButton and self._pending_preserved_drag_rows:
+                pos = event.position().toPoint()
+                idx = self.indexAt(pos)
+                if idx.isValid():
+                    self._set_current_no_update(idx)
+                event.accept()
+                return
+            super().mouseReleaseEvent(event)
+        finally:
+            if event.button() == QtCore.Qt.MouseButton.LeftButton:
+                self._suppress_drag_select_until_release = False
+                self._pending_preserved_drag_rows = []
+                self._pending_preserved_drag_pos = None
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            idx = self.indexAt(event.position().toPoint())
+            if idx.isValid():
+                mods = QtWidgets.QApplication.keyboardModifiers()
+                if (
+                    mods == QtCore.Qt.KeyboardModifier.NoModifier
+                    and self._is_row_selected(idx.row())
+                    and self._selected_row_count() > 1
+                ):
+                    self._set_current_no_update(idx)
+                    item = self.item(idx.row(), idx.column())
+                    if item is not None and bool(item.flags() & QtCore.Qt.ItemFlag.ItemIsEditable):
+                        self.edit(idx)
+                    event.accept()
+                    return
+        super().mouseDoubleClickEvent(event)
+
+    def startDrag(self, supportedActions: QtCore.Qt.DropActions) -> None:
+        self._clear_drop_indicator()
+        drag = QtGui.QDrag(self)
+        mime = self.model().mimeData(self.selectedIndexes())
+        if mime is None:
+            return
+        drag.setMimeData(mime)
+
+        selection_model = self.selectionModel()
+        rows = (
+            sorted({idx.row() for idx in selection_model.selectedRows() if idx.isValid()})
+            if selection_model is not None
+            else []
+        )
+        count = len(rows) if rows else (1 if self.currentRow() >= 0 else 0)
+        if count > 0:
+            if count == 1 and rows:
+                name_item = self.item(rows[0], 0)
+                label = (name_item.text().strip() if name_item else "") or "Move job"
+            elif count == 1:
+                label = "Move job"
+            else:
+                label = f"Move {count} jobs"
+            label = label[:48]
+
+            font = self.font()
+            fm = QtGui.QFontMetrics(font)
+            text_w = fm.horizontalAdvance(label)
+            w = max(96, text_w + 22)
+            h = max(24, fm.height() + 10)
+            dpr = 1.0
+            win = self.window().windowHandle() if self.window() is not None else None
+            if win is not None:
+                try:
+                    dpr = max(1.0, float(win.devicePixelRatio()))
+                except Exception:
+                    dpr = 1.0
+            badge = QtGui.QPixmap(int(w * dpr), int(h * dpr))
+            badge.setDevicePixelRatio(dpr)
+            badge.fill(QtCore.Qt.GlobalColor.transparent)
+            painter = QtGui.QPainter(badge)
+            try:
+                painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+                bg = QtGui.QColor(50, 50, 50, 230)
+                border = QtGui.QColor(120, 120, 120, 220)
+                painter.setPen(QtGui.QPen(border, 1))
+                painter.setBrush(bg)
+                painter.drawRoundedRect(QtCore.QRectF(0.5, 0.5, w - 1.0, h - 1.0), 6, 6)
+                painter.setPen(QtGui.QColor(245, 245, 245))
+                painter.drawText(
+                    QtCore.QRect(10, 0, w - 20, h),
+                    QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+                    label,
+                )
+            finally:
+                painter.end()
+            drag.setPixmap(badge)
+            drag.setHotSpot(QtCore.QPoint(12, h // 2))
+
+        try:
+            drag.exec(supportedActions, QtCore.Qt.DropAction.MoveAction)
+        finally:
+            self._clear_drop_indicator()
+
+    def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:
+        if event.source() is self:
+            event.setDropAction(QtCore.Qt.DropAction.MoveAction)
+            event.accept()
+            self._set_drop_indicator_from_pos(self._viewport_drag_pos())
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event: QtGui.QDragMoveEvent) -> None:
+        if event.source() is self:
+            event.setDropAction(QtCore.Qt.DropAction.MoveAction)
+            event.accept()
+            self._set_drop_indicator_from_pos(self._viewport_drag_pos())
+            return
+        super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event: QtGui.QDragLeaveEvent) -> None:
+        self._clear_drop_indicator()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event: QtGui.QDropEvent) -> None:
+        sm = self.selectionModel()
+        selected_rows = (
+            sorted({idx.row() for idx in sm.selectedRows() if idx.isValid()})
+            if sm is not None
+            else []
+        )
+        source_row = self.currentRow()
+        if source_row < 0 and not selected_rows:
+            event.ignore()
+            return
+        target_row = self._drop_indicator_row
+        if target_row is None:
+            target_row = self._drop_target_row_from_y(self._viewport_drag_pos().y())
+        if len(selected_rows) > 1:
+            self.rows_reordered_by_drag.emit(selected_rows, target_row)
+        else:
+            self.row_reordered_by_drag.emit(source_row, target_row)
+        event.setDropAction(QtCore.Qt.DropAction.MoveAction)
+        event.accept()
+        self._clear_drop_indicator()
+
+
+class QueueTreeView(QtWidgets.QTreeView):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.base_row_color = QtGui.QColor("#353535")
+        self.alt_row_color = QtGui.QColor("#383838")
+        self.selection_row_color = QtGui.QColor(DEFAULT_THEME["selection_row"])
+        self.selection_row_alt_color = QtGui.QColor(DEFAULT_THEME["selection_row_alt"])
+        self.selection_overlay_opacity = int(DEFAULT_THEME.get("selection_overlay_opacity", 95))
+
+    def _row_fill_and_overlay(self, index: QtCore.QModelIndex) -> tuple[QtGui.QColor, QtGui.QColor | None]:
+        alt = bool(index.row() % 2)
+        fill = QtGui.QColor(self.alt_row_color if alt else self.base_row_color)
+        selection_model = self.selectionModel()
+        if selection_model is None or not selection_model.isSelected(index):
+            return fill, None
+        overlay = QtGui.QColor(self.selection_row_alt_color if alt else self.selection_row_color)
+        overlay.setAlpha(max(0, min(255, int(self.selection_overlay_opacity))))
+        return fill, overlay
+
+    def drawRow(
+        self,
+        painter: QtGui.QPainter,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> None:
+        painter.save()
+        row_rect = option.rect
+        full_rect = QtCore.QRect(0, row_rect.top(), self.viewport().width(), row_rect.height())
+        fill, overlay = self._row_fill_and_overlay(index)
+        painter.fillRect(full_rect, fill)
+        if overlay is not None:
+            painter.fillRect(full_rect, overlay)
+        painter.restore()
+        item_rect = self.visualRect(index)
+        branch_width = max(0, item_rect.left())
+        if branch_width > 0:
+            self.drawBranches(
+                painter,
+                QtCore.QRect(0, option.rect.top(), branch_width, option.rect.height()),
+                index,
+            )
+        delegate = self.itemDelegateForIndex(index)
+        if delegate is None:
+            delegate = self.itemDelegate()
+        if delegate is None:
+            return
+        item_opt = QtWidgets.QStyleOptionViewItem(option)
+        item_opt.rect = item_rect
+        item_opt.showDecorationSelected = False
+        if item_opt.state & QtWidgets.QStyle.StateFlag.State_Selected:
+            item_opt.state &= ~QtWidgets.QStyle.StateFlag.State_Selected
+            item_opt.state &= ~QtWidgets.QStyle.StateFlag.State_HasFocus
+        item_opt.backgroundBrush = QtGui.QBrush(QtCore.Qt.GlobalColor.transparent)
+        delegate.paint(painter, item_opt, index)
+
+    def drawBranches(
+        self,
+        painter: QtGui.QPainter,
+        rect: QtCore.QRect,
+        index: QtCore.QModelIndex,
+    ) -> None:
+        painter.save()
+        fill, overlay = self._row_fill_and_overlay(index)
+        painter.fillRect(rect, fill)
+        if overlay is not None:
+            painter.fillRect(rect, overlay)
+        painter.restore()
+        super().drawBranches(painter, rect, index)
+
+
+class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
+    STATUS_ROLE = QtCore.Qt.ItemDataRole.UserRole + 20
+    _offline_stripe_brush: QtGui.QBrush | None = None
+
+    def createEditor(
+        self,
+        parent: QtWidgets.QWidget,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> QtWidgets.QWidget | None:
+        if index.column() == QueueTableWidget.FRAME_HANDLING_COLUMN:
+            return None
+        return super().createEditor(parent, option, index)
+
+    def setEditorData(self, editor: QtWidgets.QWidget, index: QtCore.QModelIndex) -> None:
+        if index.column() == QueueTableWidget.FRAME_HANDLING_COLUMN:
+            return
+        super().setEditorData(editor, index)
+
+    def setModelData(
+        self,
+        editor: QtWidgets.QWidget,
+        model: QtCore.QAbstractItemModel,
+        index: QtCore.QModelIndex,
+    ) -> None:
+        if index.column() == QueueTableWidget.FRAME_HANDLING_COLUMN:
+            return
+        super().setModelData(editor, model, index)
+
+    def updateEditorGeometry(
+        self,
+        editor: QtWidgets.QWidget,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> None:
+        if index.column() == QueueTableWidget.FRAME_HANDLING_COLUMN:
+            return
+        super().updateEditorGeometry(editor, option, index)
+
+    @staticmethod
+    def _selection_overlay_color(widget: QtWidgets.QWidget | None, row: int) -> QtGui.QColor | None:
+        if widget is None:
+            return None
+        base = getattr(widget, "selection_row_alt_color", None) if (row % 2) else getattr(widget, "selection_row_color", None)
+        if not isinstance(base, QtGui.QColor):
+            return None
+        c = QtGui.QColor(base)
+        # Overlay tint, not full replacement.
+        opacity = getattr(widget, "selection_overlay_opacity", 95)
+        try:
+            c.setAlpha(max(0, min(255, int(opacity))))
+        except Exception:
+            c.setAlpha(95)
+        return c
+
+    @staticmethod
+    def _paint_selection_overlay(
+        painter: QtGui.QPainter,
+        rect: QtCore.QRect,
+        overlay: QtGui.QColor | None,
+    ) -> None:
+        if overlay is None:
+            return
+        painter.save()
+        painter.fillRect(rect, overlay)
+        painter.restore()
+
+    @staticmethod
+    def _offline_stripe_texture_brush() -> QtGui.QBrush:
+        cached = QueueTableItemDelegate._offline_stripe_brush
+        if cached is not None:
+            return QtGui.QBrush(cached)
+
+        app = QtWidgets.QApplication.instance()
+        screen = app.primaryScreen() if app is not None else None
+        dpr = float(screen.devicePixelRatio() if screen is not None else 1.0)
+
+        logical_size = 16
+        spacing = 8
+        pixel_size = max(logical_size, int(round(logical_size * dpr)))
+
+        pix = QtGui.QPixmap(pixel_size, pixel_size)
+        pix.setDevicePixelRatio(dpr)
+        pix.fill(QtCore.Qt.GlobalColor.transparent)
+
+        painter = QtGui.QPainter(pix)
+        try:
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+            pen = QtGui.QPen(QtGui.QColor("#5a5a5a"))
+            pen.setWidthF(1.0)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+
+            x = -logical_size
+            while x <= logical_size * 2:
+                painter.drawLine(
+                    QtCore.QPointF(float(x), float(logical_size)),
+                    QtCore.QPointF(float(x + logical_size), 0.0),
+                )
+                x += spacing
+        finally:
+            painter.end()
+
+        brush = QtGui.QBrush(pix)
+        QueueTableItemDelegate._offline_stripe_brush = brush
+        return QtGui.QBrush(brush)
+
+    @staticmethod
+    def _paint_offline_stripes(
+        painter: QtGui.QPainter,
+        rect: QtCore.QRect,
+    ) -> None:
+        painter.save()
+        painter.setClipRect(rect)
+        painter.setBrushOrigin(0, 0)
+        painter.fillRect(rect, QueueTableItemDelegate._offline_stripe_texture_brush())
+        painter.restore()
+
+    def paint(
+        self,
+        painter: QtGui.QPainter,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> None:
+        opt = QtWidgets.QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        selected = bool(opt.state & QtWidgets.QStyle.StateFlag.State_Selected)
+        if selected:
+            opt.state &= ~QtWidgets.QStyle.StateFlag.State_Selected
+            opt.state &= ~QtWidgets.QStyle.StateFlag.State_HasFocus
+        overlay = self._selection_overlay_color(opt.widget, index.row()) if selected else None
+        is_offline = str(index.data(self.STATUS_ROLE) or "") == "Offline"
+        if index.column() == 7:
+            self._paint_split_progress(
+                painter,
+                opt,
+                index,
+                overlay,
+                offline=is_offline,
+            )
+            return
+        if index.column() == QueueTableWidget.FRAME_HANDLING_COLUMN:
+            self._paint_combo_cell(
+                painter,
+                opt,
+                index,
+                overlay,
+                offline=is_offline,
+            )
+            return
+
+        if index.column() not in {0, 1, 2, 16}:
+            super().paint(painter, opt, index)
+            self._paint_selection_overlay(painter, opt.rect, overlay)
+            if is_offline:
+                self._paint_offline_stripes(painter, opt.rect)
+            return
+
+        full_text = opt.text
+        opt.text = ""
+        style = opt.widget.style() if opt.widget is not None else QtWidgets.QApplication.style()
+        style.drawControl(QtWidgets.QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        self._paint_selection_overlay(painter, opt.rect, overlay)
+        if is_offline:
+            self._paint_offline_stripes(painter, opt.rect)
+
+        text_rect = style.subElementRect(QtWidgets.QStyle.SubElement.SE_ItemViewItemText, opt, opt.widget)
+        text_rect = text_rect.adjusted(4, 0, -4, 0)
+        if text_rect.width() <= 0:
+            return
+        fm = opt.fontMetrics
+        elided = fm.elidedText(full_text, QtCore.Qt.TextElideMode.ElideRight, text_rect.width())
+        painter.save()
+        painter.setFont(opt.font)
+        painter.setPen(opt.palette.color(QtGui.QPalette.ColorRole.Text))
+        painter.drawText(
+            text_rect,
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+            elided,
+        )
+        painter.restore()
+
+    def _paint_combo_cell(
+        self,
+        painter: QtGui.QPainter,
+        opt: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+        overlay: QtGui.QColor | None,
+        *,
+        offline: bool = False,
+    ) -> None:
+        style = opt.widget.style() if opt.widget is not None else QtWidgets.QApplication.style()
+        bg_opt = QtWidgets.QStyleOptionViewItem(opt)
+        bg_opt.text = ""
+        style.drawControl(QtWidgets.QStyle.ControlElement.CE_ItemViewItem, bg_opt, painter, bg_opt.widget)
+        self._paint_selection_overlay(painter, opt.rect, overlay)
+        if offline:
+            self._paint_offline_stripes(painter, opt.rect)
+        widget = opt.widget
+        fg = QtGui.QColor(getattr(widget, "combo_text_color", QtGui.QColor("#ffffff")))
+        rect = opt.rect
+        arrow_w = 18
+        left_pad = 6
+        text = str(index.data(QtCore.Qt.ItemDataRole.DisplayRole) or "")
+
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(fg)
+        text_rect = QtCore.QRect(rect.left() + left_pad, rect.top(), max(0, rect.width() - arrow_w - left_pad - 2), rect.height())
+        elided = opt.fontMetrics.elidedText(text, QtCore.Qt.TextElideMode.ElideRight, text_rect.width())
+        painter.drawText(
+            text_rect,
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+            elided,
+        )
+        arrow_rect = QtCore.QRect(rect.right() - arrow_w, rect.top(), arrow_w, rect.height())
+        arrow_opt = QtWidgets.QStyleOption()
+        arrow_opt.rect = arrow_rect.adjusted(1, 0, -1, 0)
+        arrow_opt.palette = opt.palette
+        if widget is not None:
+            arrow_opt.state = QtWidgets.QStyle.StateFlag.State_Enabled
+        style.drawPrimitive(QtWidgets.QStyle.PrimitiveElement.PE_IndicatorArrowDown, arrow_opt, painter, opt.widget)
+        painter.restore()
+
+    def _paint_split_progress(
+        self,
+        painter: QtGui.QPainter,
+        opt: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+        overlay: QtGui.QColor | None = None,
+        *,
+        offline: bool = False,
+    ) -> None:
+        style = opt.widget.style() if opt.widget is not None else QtWidgets.QApplication.style()
+        text = opt.text
+        build_pct = index.data(QtCore.Qt.ItemDataRole.UserRole + 10)
+        render_pct = index.data(QtCore.Qt.ItemDataRole.UserRole + 11)
+
+        bg_opt = QtWidgets.QStyleOptionViewItem(opt)
+        bg_opt.text = ""
+        style.drawControl(QtWidgets.QStyle.ControlElement.CE_ItemViewItem, bg_opt, painter, bg_opt.widget)
+        self._paint_selection_overlay(painter, opt.rect, overlay)
+        if offline:
+            self._paint_offline_stripes(painter, opt.rect)
+
+        rect = style.subElementRect(QtWidgets.QStyle.SubElement.SE_ItemViewItemText, bg_opt, bg_opt.widget)
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+
+        painter.save()
+        try:
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, False)
+            track_color = QtGui.QColor(45, 45, 45)
+            widget = opt.widget
+            build_color = QtGui.QColor(
+                getattr(widget, "progress_usd_build_color", QtGui.QColor(DEFAULT_THEME.get("progress_usd_build", "#11b7b7")))
+            )
+            render_color = QtGui.QColor(
+                getattr(widget, "progress_render_color", QtGui.QColor(DEFAULT_THEME.get("progress_render", "#2fbf4a")))
+            )
+
+            line_h = 2
+            gap = 0
+            total_h = line_h * 2
+            y_bottom = rect.bottom()
+            top_y = max(rect.top(), y_bottom - total_h + 1)
+            top_rect = QtCore.QRect(rect.left(), top_y, rect.width(), line_h)
+            bot_rect = QtCore.QRect(rect.left(), top_y + line_h + gap, rect.width(), line_h)
+
+            has_build = build_pct is not None
+            has_render = render_pct is not None
+            if has_build:
+                painter.fillRect(top_rect, track_color)
+            if has_render:
+                painter.fillRect(bot_rect, track_color)
+
+            def _fill_bar(bar_rect: QtCore.QRect, pct_value: object, color: QtGui.QColor) -> None:
+                try:
+                    pct = int(pct_value)
+                except Exception:
+                    return
+                pct = max(0, min(100, pct))
+                if pct <= 0:
+                    return
+                w = int((bar_rect.width() * pct) / 100)
+                if w <= 0:
+                    return
+                painter.fillRect(QtCore.QRect(bar_rect.left(), bar_rect.top(), w, bar_rect.height()), color)
+
+            if has_build:
+                _fill_bar(top_rect, build_pct, build_color)
+            if has_render:
+                _fill_bar(bot_rect, render_pct, render_color)
+
+            painter.setPen(opt.palette.color(QtGui.QPalette.ColorRole.Text))
+            elided = opt.fontMetrics.elidedText(text, QtCore.Qt.TextElideMode.ElideRight, rect.width() - 6)
+            text_rect = rect.adjusted(4, 0, -2, -total_h)
+            painter.drawText(text_rect, QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter, elided)
+        finally:
+            painter.restore()
+
+
+class QueueTreeItemDelegate(QtWidgets.QStyledItemDelegate):
+    def paint(
+        self,
+        painter: QtGui.QPainter,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> None:
+        opt = QtWidgets.QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = str(opt.text or "")
+        text_rect = QtCore.QRect(opt.rect).adjusted(0, 0, -4, 0)
+        if text_rect.width() <= 0:
+            return
+        elided = opt.fontMetrics.elidedText(text, QtCore.Qt.TextElideMode.ElideRight, text_rect.width())
+        painter.save()
+        painter.setFont(opt.font)
+        painter.setPen(opt.palette.color(QtGui.QPalette.ColorRole.Text))
+        painter.drawText(
+            text_rect,
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+            elided,
+        )
+        painter.restore()
+
+    def updateEditorGeometry(
+        self,
+        editor: QtWidgets.QWidget,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> None:
+        view = self.parent()
+        if not isinstance(view, QtWidgets.QTreeView):
+            super().updateEditorGeometry(editor, option, index)
+            return
+        viewport = view.viewport()
+        left = option.rect.left()
+        right_margin = 8
+        width = max(80, viewport.width() - left - right_margin)
+        editor.setGeometry(QtCore.QRect(left, option.rect.top(), width, option.rect.height()))

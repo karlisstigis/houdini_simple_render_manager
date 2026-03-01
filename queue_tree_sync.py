@@ -1,0 +1,188 @@
+"""Shared queue/tree path propagation and ROP metadata refresh helpers."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Callable
+
+from queue_editing import apply_queue_path_text
+from rop_metadata import RopInfo, apply_rop_info_to_job as apply_rop_info_to_job_model
+
+
+def validate_queue_path_value(column: int, text: str) -> str:
+    value = str(text or "").strip()
+    if column == 1:
+        if not value:
+            raise ValueError("HIP path cannot be empty.")
+        return value
+    if column == 2:
+        if not value:
+            raise ValueError("ROP path cannot be empty.")
+        if not value.startswith("/"):
+            raise ValueError("ROP path should look like /out/my_rop.")
+        return value
+    return value
+
+
+def sync_job_after_path_change(
+    job: Any,
+    *,
+    probe_cache: dict[tuple[str, str], RopInfo | None],
+    probe_rop_info: Callable[[str, str], RopInfo | None],
+    mark_job_offline: Callable[[Any, str | None], None],
+    restore_job_online_status: Callable[[Any], None],
+    normalize_output_display_path: Callable[[str], str],
+) -> None:
+    hip_path = str(job.hip_path or "").strip()
+    rop_path = str(job.rop_path or "").strip()
+    if not hip_path or not Path(hip_path).exists():
+        mark_job_offline(job, "HIP file not found.")
+        return
+    key = (hip_path, rop_path)
+    if key not in probe_cache:
+        probe_cache[key] = probe_rop_info(hip_path, rop_path)
+    info = probe_cache.get(key)
+    if info is None:
+        return
+    if info.error == "node_not_found":
+        mark_job_offline(job, "ROP node not found in HIP file.")
+        return
+    apply_rop_info_to_job_model(
+        job,
+        info,
+        normalize_output_display_path,
+        apply_runtime_range=True,
+    )
+    restore_job_online_status(job)
+
+
+def propagate_hip_path_change(
+    jobs: list[Any],
+    *,
+    old_hip: str,
+    new_hip: str,
+    running_status: Any,
+    probe_rop_info: Callable[[str, str], RopInfo | None],
+    mark_job_offline: Callable[[Any, str | None], None],
+    restore_job_online_status: Callable[[Any], None],
+    normalize_output_display_path: Callable[[str], str],
+) -> list[str]:
+    old_key = str(old_hip or "").strip()
+    new_key = str(new_hip or "").strip()
+    probe_cache: dict[tuple[str, str], RopInfo | None] = {}
+    changed_ids: list[str] = []
+    for job in jobs:
+        if job.status == running_status:
+            continue
+        if str(job.hip_path or "").strip() != old_key:
+            continue
+        try:
+            apply_queue_path_text(job, 1, new_key)
+        except ValueError:
+            continue
+        sync_job_after_path_change(
+            job,
+            probe_cache=probe_cache,
+            probe_rop_info=probe_rop_info,
+            mark_job_offline=mark_job_offline,
+            restore_job_online_status=restore_job_online_status,
+            normalize_output_display_path=normalize_output_display_path,
+        )
+        changed_ids.append(job.id)
+    return changed_ids
+
+
+def propagate_rop_path_change(
+    jobs: list[Any],
+    *,
+    hip_path: str,
+    old_rop: str,
+    new_rop: str,
+    running_status: Any,
+    probe_rop_info: Callable[[str, str], RopInfo | None],
+    mark_job_offline: Callable[[Any, str | None], None],
+    restore_job_online_status: Callable[[Any], None],
+    normalize_output_display_path: Callable[[str], str],
+) -> list[str]:
+    hip_key = str(hip_path or "").strip()
+    old_key = str(old_rop or "").strip()
+    new_key = str(new_rop or "").strip()
+    probe_cache: dict[tuple[str, str], RopInfo | None] = {}
+    changed_ids: list[str] = []
+    for job in jobs:
+        if job.status == running_status:
+            continue
+        if str(job.hip_path or "").strip() != hip_key:
+            continue
+        if str(job.rop_path or "").strip() != old_key:
+            continue
+        try:
+            apply_queue_path_text(job, 2, new_key)
+        except ValueError:
+            continue
+        sync_job_after_path_change(
+            job,
+            probe_cache=probe_cache,
+            probe_rop_info=probe_rop_info,
+            mark_job_offline=mark_job_offline,
+            restore_job_online_status=restore_job_online_status,
+            normalize_output_display_path=normalize_output_display_path,
+        )
+        changed_ids.append(job.id)
+    return changed_ids
+
+
+def refresh_jobs_from_rop_metadata(
+    target_jobs: list[Any],
+    *,
+    running_status: Any,
+    scan_rop_info_for_hip: Callable[[str], dict[str, RopInfo]],
+    probe_rop_info: Callable[[str, str], RopInfo | None],
+    mark_job_offline: Callable[[Any, str | None], None],
+    restore_job_online_status: Callable[[Any], None],
+    clear_job_resume_runtime_state: Callable[[Any], None],
+    normalize_output_display_path: Callable[[str], str],
+    reset_override_to_rop: bool = False,
+) -> list[str]:
+    changed_ids: list[str] = []
+    by_hip: dict[str, list[Any]] = {}
+    for target in target_jobs:
+        if target.status == running_status:
+            continue
+        by_hip.setdefault(target.hip_path, []).append(target)
+
+    for hip_path, hip_jobs in by_hip.items():
+        if not Path(hip_path).exists():
+            for target in hip_jobs:
+                mark_job_offline(target, "HIP file not found.")
+                changed_ids.append(target.id)
+            continue
+        scan_info_map = scan_rop_info_for_hip(hip_path)
+        single_probe_cache: dict[str, RopInfo | None] = {}
+        for target in hip_jobs:
+            info = scan_info_map.get(target.rop_path)
+            if info is None:
+                if target.rop_path not in single_probe_cache:
+                    single_probe_cache[target.rop_path] = probe_rop_info(target.hip_path, target.rop_path)
+                info = single_probe_cache[target.rop_path]
+            if info is None:
+                continue
+            if info.error == "node_not_found":
+                mark_job_offline(target, "ROP node not found in HIP file.")
+                changed_ids.append(target.id)
+                continue
+            if reset_override_to_rop:
+                target.frame_range_mode = "use_rop"
+                target.start_frame = None
+                target.end_frame = None
+                target.step = None
+                clear_job_resume_runtime_state(target)
+            apply_rop_info_to_job_model(
+                target,
+                info,
+                normalize_output_display_path,
+                apply_runtime_range=True,
+            )
+            restore_job_online_status(target)
+            changed_ids.append(target.id)
+    return changed_ids
