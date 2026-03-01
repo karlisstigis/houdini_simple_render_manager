@@ -87,7 +87,7 @@ class ScanCoordinator:
         )
 
     def probe_and_apply_job_rop_metadata(self, job: RenderJob) -> str | None:
-        info = self.probe_rop_info(job.hip_path, job.rop_path)
+        info = self.probe_rop_info(job.spec.hip_path, job.spec.rop_path)
         if info is not None:
             apply_rop_info_to_job_model(
                 job,
@@ -99,10 +99,10 @@ class ScanCoordinator:
             return None
         err = str(info.error) if info.runtime_start_frame is None or info.runtime_end_frame is None else None
         if err:
-            self._hooks.append_log("Stderr", f"[ROP Probe] {job.rop_path}: {err}\n")
+            self._hooks.append_log("Stderr", f"[ROP Probe] {job.spec.rop_path}: {err}\n")
             return err
         if info.returncode not in (None, 0):
-            self._hooks.append_log("Stderr", f"[ROP Probe] hbatch exited {info.returncode} while resolving {job.rop_path}\n")
+            self._hooks.append_log("Stderr", f"[ROP Probe] hbatch exited {info.returncode} while resolving {job.spec.rop_path}\n")
         return None
 
     def probe_rop_strict_frame_range(self, hip_path: str, rop_path: str) -> bool | None:

@@ -28,6 +28,34 @@ class QueueModelTests(unittest.TestCase):
         self.assertEqual(job.view.progress_text, "1004")
         self.assertFalse(job.spec.enabled)
 
+    def test_render_job_display_helpers_use_nested_sections(self) -> None:
+        job = RenderJob(
+            hip_path="E:/shot/test.hip",
+            rop_path="/out/mantra1",
+            frame_range_mode="override",
+            start_frame=1001,
+            end_frame=1010,
+            step=2,
+            name="",
+            status=JobStatus.QUEUED,
+            enabled=True,
+            frame_handling_mode=FrameHandlingMode.OVERWRITE,
+        )
+        self.assertEqual(job.display_name(), "test | mantra1")
+        self.assertEqual(job.frame_display(), "1001-1010x2")
+        self.assertEqual(job.frame_range_display(), "1001-1010")
+        self.assertEqual(job.step_display(), "2")
+        self.assertEqual(job.total_override_frames(), 5)
+        self.assertEqual(job.frame_handling_label(), "Overwrite")
+
+    def test_render_job_display_helpers_use_runtime_range_when_not_overridden(self) -> None:
+        job = RenderJob("E:/shot/test.hip", "/out/mantra1", "use_rop")
+        job.runtime.runtime_start_frame = 1001.0
+        job.runtime.runtime_end_frame = 1003.0
+        job.runtime.runtime_step = 1.0
+        self.assertEqual(job.frame_range_display(), "1001-1003")
+        self.assertEqual(job.step_display(), "1")
+
 
 if __name__ == "__main__":
     unittest.main()

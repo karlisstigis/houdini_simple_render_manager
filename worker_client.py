@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 from typing import Literal
 from uuid import uuid4
 
@@ -27,19 +28,28 @@ class _BaseWorkerClient(QtCore.QObject):
         *,
         worker_python_path: str,
         worker_script_path: Path,
+        worker_label: str,
         terminal_message_types: set[str],
         tracked_request_types: set[str],
+        heartbeat_timeout_sec: float = 12.0,
         parent: QtCore.QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._worker_python_path = str(worker_python_path or "python")
         self._worker_script_path = Path(worker_script_path)
+        self._worker_label = str(worker_label or "Worker")
         self._terminal_message_types = set(terminal_message_types)
         self._tracked_request_types = set(tracked_request_types)
+        self._heartbeat_timeout_sec = max(1.0, float(heartbeat_timeout_sec))
         self._process: QtCore.QProcess | None = None
         self._stdout_buffer = MessageBuffer()
         self._last_stderr_text = ""
         self._active_request_id = ""
+        self._last_activity_monotonic = 0.0
+        self._suppress_unexpected_exit = False
+        self._health_timer = QtCore.QTimer(self)
+        self._health_timer.setInterval(1000)
+        self._health_timer.timeout.connect(self._check_health)
 
     @property
     def last_stderr_text(self) -> str:
@@ -57,6 +67,8 @@ class _BaseWorkerClient(QtCore.QObject):
         proc = QtCore.QProcess(self)
         self._process = proc
         self._last_stderr_text = ""
+        self._suppress_unexpected_exit = False
+        self._mark_activity()
         proc.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.SeparateChannels)
         proc.readyReadStandardOutput.connect(self._on_stdout)
         proc.readyReadStandardError.connect(self._on_stderr)
@@ -66,6 +78,7 @@ class _BaseWorkerClient(QtCore.QObject):
         if not proc.waitForStarted(5000):
             self._process = None
             return False
+        self._health_timer.start()
         return True
 
     def send_request(self, message_type: str, payload: dict, *, request_id: str | None = None) -> str | None:
@@ -74,6 +87,7 @@ class _BaseWorkerClient(QtCore.QObject):
         send_request_id = str(request_id or uuid4().hex)
         if message_type in self._tracked_request_types:
             self._set_active_request_id(send_request_id)
+        self._mark_activity()
         self._process.write(encode_message(message_type, send_request_id, payload))
         return send_request_id
 
@@ -81,6 +95,8 @@ class _BaseWorkerClient(QtCore.QObject):
         proc = self._process
         if proc is None:
             return
+        self._health_timer.stop()
+        self._suppress_unexpected_exit = True
         if proc.state() != QtCore.QProcess.ProcessState.NotRunning:
             proc.kill()
             proc.waitForFinished(2000)
@@ -88,19 +104,28 @@ class _BaseWorkerClient(QtCore.QObject):
         self._process = None
         self._set_active_request_id("")
 
+    def _mark_activity(self) -> None:
+        self._last_activity_monotonic = time.monotonic()
+
     def _set_active_request_id(self, request_id: str) -> None:
         previous = bool(self._active_request_id)
         self._active_request_id = str(request_id or "")
         current = bool(self._active_request_id)
         if previous != current:
             self.busy_changed.emit(current)
+        if current:
+            self._mark_activity()
 
     def _on_stdout(self) -> None:
         if self._process is None:
             return
+        self._mark_activity()
         for message in self._stdout_buffer.push_bytes(bytes(self._process.readAllStandardOutput())):
             request_id = str(message.get("request_id", "") or "")
             message_type = str(message.get("type", "") or "")
+            if message_type == "worker.heartbeat":
+                self._mark_activity()
+                continue
             if request_id and request_id == self._active_request_id and message_type in self._terminal_message_types:
                 self._set_active_request_id("")
             self.message_received.emit(message)
@@ -108,6 +133,7 @@ class _BaseWorkerClient(QtCore.QObject):
     def _on_stderr(self) -> None:
         if self._process is None:
             return
+        self._mark_activity()
         text = bytes(self._process.readAllStandardError()).decode(errors="replace")
         if not text:
             return
@@ -118,14 +144,46 @@ class _BaseWorkerClient(QtCore.QObject):
         self.stderr_received.emit(f"[Worker process error] {err}\n")
 
     def _unexpected_exit_message(self, exit_code: int) -> str:
-        return f"Worker exited unexpectedly (code {exit_code})."
+        return f"{self._worker_label} exited unexpectedly (code {exit_code})."
+
+    def _hung_message(self) -> str:
+        return f"{self._worker_label} became unresponsive."
+
+    def _check_health(self) -> None:
+        proc = self._process
+        if not self._active_request_id or proc is None:
+            return
+        if proc.state() == QtCore.QProcess.ProcessState.NotRunning:
+            return
+        if (time.monotonic() - self._last_activity_monotonic) <= self._heartbeat_timeout_sec:
+            return
+        self._fail_worker(self._hung_message())
+
+    def _fail_worker(self, reason: str) -> None:
+        proc = self._process
+        if proc is None:
+            return
+        self._health_timer.stop()
+        self._suppress_unexpected_exit = True
+        self._set_active_request_id("")
+        if proc.state() != QtCore.QProcess.ProcessState.NotRunning:
+            proc.kill()
+            proc.waitForFinished(2000)
+        proc.deleteLater()
+        self._process = None
+        self.worker_failed.emit(reason)
 
     def _on_finished(self, exit_code: int, exit_status: QtCore.QProcess.ExitStatus) -> None:
         _ = exit_status
+        self._health_timer.stop()
         proc = self._process
         if proc is not None:
             proc.deleteLater()
         self._process = None
+        if self._suppress_unexpected_exit:
+            self._suppress_unexpected_exit = False
+            self._set_active_request_id("")
+            return
         if self._active_request_id:
             self.worker_failed.emit(self._unexpected_exit_message(exit_code))
             self._set_active_request_id("")
@@ -136,8 +194,10 @@ class ScanWorkerClient(_BaseWorkerClient):
         super().__init__(
             worker_python_path=worker_python_path,
             worker_script_path=worker_script_path,
+            worker_label="Scan worker",
             terminal_message_types={"scan.result", "scan.failed", "probe.result", "probe.strict_range_result", "worker.error"},
             tracked_request_types={"scan.nodes", "scan.rop_info", "scan.strict_range"},
+            heartbeat_timeout_sec=20.0,
             parent=parent,
         )
 
@@ -201,7 +261,9 @@ class RenderWorkerClient(_BaseWorkerClient):
         super().__init__(
             worker_python_path=worker_python_path,
             worker_script_path=worker_script_path,
+            worker_label="Render worker",
             terminal_message_types={"render.finished", "render.crashed", "worker.error"},
             tracked_request_types={"render.start"},
+            heartbeat_timeout_sec=12.0,
             parent=parent,
         )

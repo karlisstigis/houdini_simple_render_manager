@@ -3,104 +3,86 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+
+from queue_models import JobStatus, RenderJob
 
 
-def clear_job_resume_runtime_state(job: Any) -> None:
-    job.resume_start_frame_runtime = None
-    job.resume_end_frame_runtime = None
-    job.resume_step_runtime = None
-    job.resume_completed_baseline_count = 0
+def clear_job_resume_runtime_state(job: RenderJob) -> None:
+    job.runtime.resume_start_frame_runtime = None
+    job.runtime.resume_end_frame_runtime = None
+    job.runtime.resume_step_runtime = None
+    job.runtime.resume_completed_baseline_count = 0
 
 
-def reset_job_state(job: Any) -> None:
-    try:
-        status_type = type(job.status)
-        running = status_type.RUNNING
-        queued = status_type.QUEUED
-    except Exception:
-        running = None
-        queued = None
-    if running is not None and job.status == running:
+def reset_job_state(job: RenderJob) -> None:
+    if job.runtime.status == JobStatus.RUNNING:
         return
-    if queued is not None:
-        job.status = queued
-    job.offline_previous_status = None
-    job.started_at = None
-    job.finished_at = None
-    job.exit_code = None
-    job.error_summary = ""
-    job.interrupted_reason = ""
-    job.offline_detected_reason = ""
-    job.phase_text = ""
-    job.progress_text = "-"
-    job.percent_text = "-"
-    job.usd_build_percent = None
-    job.last_frame_seen = None
-    job.build_pass_completed = False
-    job.prev_frame_time_text = "-"
-    job.avg_frame_time_text = "-"
-    job.est_job_time_text = "-"
-    job.render_frame_started_at.clear()
-    job.render_frame_durations_sec.clear()
-    job.render_completed_frames.clear()
+    job.runtime.status = JobStatus.QUEUED
+    job.runtime.offline_previous_status = None
+    job.runtime.started_at = None
+    job.runtime.finished_at = None
+    job.runtime.exit_code = None
+    job.runtime.error_summary = ""
+    job.runtime.interrupted_reason = ""
+    job.runtime.offline_detected_reason = ""
+    job.view.phase_text = ""
+    job.view.progress_text = "-"
+    job.view.percent_text = "-"
+    job.view.usd_build_percent = None
+    job.view.last_frame_seen = None
+    job.view.build_pass_completed = False
+    job.view.prev_frame_time_text = "-"
+    job.view.avg_frame_time_text = "-"
+    job.view.est_job_time_text = "-"
+    job.view.render_frame_started_at.clear()
+    job.view.render_frame_durations_sec.clear()
+    job.view.render_completed_frames.clear()
     clear_job_resume_runtime_state(job)
 
 
-def mark_job_offline(job: Any, reason: str | None = None) -> None:
-    try:
-        offline_enum = type(job.status).OFFLINE
-    except Exception:
-        offline_enum = None
-    if offline_enum is not None and job.status != offline_enum:
-        job.offline_previous_status = job.status
-        job.status = offline_enum
+def mark_job_offline(job: RenderJob, reason: str | None = None) -> None:
+    if job.runtime.status != JobStatus.OFFLINE:
+        job.runtime.offline_previous_status = job.runtime.status
+        job.runtime.status = JobStatus.OFFLINE
     if reason:
-        job.error_summary = reason
+        job.runtime.error_summary = reason
 
 
-def restore_job_online_status(job: Any) -> None:
-    try:
-        status_type = type(job.status)
-        offline_enum = status_type.OFFLINE
-        running_enum = status_type.RUNNING
-        queued_enum = status_type.QUEUED
-    except Exception:
+def restore_job_online_status(job: RenderJob) -> None:
+    if job.runtime.status != JobStatus.OFFLINE:
         return
-    if job.status != offline_enum:
-        return
-    restore = job.offline_previous_status or queued_enum
-    if restore == running_enum:
-        restore = queued_enum
-    job.status = restore
-    job.offline_previous_status = None
+    restore = job.runtime.offline_previous_status or JobStatus.QUEUED
+    if restore == JobStatus.RUNNING:
+        restore = JobStatus.QUEUED
+    job.runtime.status = restore
+    job.runtime.offline_previous_status = None
 
 
-def apply_queue_path_text(job: Any, column: int, new_text: str) -> None:
+def apply_queue_path_text(job: RenderJob, column: int, new_text: str) -> None:
     text = (new_text or "").strip()
     if column == 1:
         if not text:
             raise ValueError("HIP path cannot be empty.")
-        job.hip_path = text
+        job.spec.hip_path = text
         return
     if column == 2:
         if not text:
             raise ValueError("ROP path cannot be empty.")
         if not text.startswith("/"):
             raise ValueError("ROP path should look like /out/my_rop.")
-        job.rop_path = text
+        job.spec.rop_path = text
         return
 
 
-def apply_queue_frame_override_text(job: Any, frame_text: str, step_text: str) -> None:
+def apply_queue_frame_override_text(job: RenderJob, frame_text: str, step_text: str) -> None:
     frame_text = (frame_text or "").strip()
     step_text = (step_text or "").strip()
 
     if frame_text.lower() in {"", "from rop"}:
-        job.frame_range_mode = "use_rop"
-        job.start_frame = None
-        job.end_frame = None
-        job.step = None
+        job.spec.frame_range_mode = "use_rop"
+        job.spec.start_frame = None
+        job.spec.end_frame = None
+        job.spec.step = None
         return
 
     m_range = re.fullmatch(r"\s*(-?\d+)\s*-\s*(-?\d+)\s*", frame_text)
@@ -128,9 +110,9 @@ def apply_queue_frame_override_text(job: Any, frame_text: str, step_text: str) -
         if step_val <= 0:
             raise ValueError("Step must be a positive integer.")
 
-    job.frame_range_mode = "override"
-    job.start_frame = start_frame
-    job.end_frame = end_frame
-    job.step = step_val
+    job.spec.frame_range_mode = "override"
+    job.spec.start_frame = start_frame
+    job.spec.end_frame = end_frame
+    job.spec.step = step_val
     # Preserve cached ROP-derived runtime range/step so UI can compare per-cell overrides
     # against the original ROP values without re-probing the HIP file on every edit.

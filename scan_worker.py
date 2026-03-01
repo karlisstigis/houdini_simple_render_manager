@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 import traceback
 from pathlib import Path
 from typing import Any
@@ -22,14 +23,31 @@ class ScanWorker(QtCore.QObject):
         super().__init__()
         self._buffer = MessageBuffer()
         self._busy = False
+        self._active_request_id = ""
+        self._emit_lock = threading.Lock()
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, name="scan-worker-heartbeat", daemon=True)
         self._stdin_reader = StdinReader(self)
         self._stdin_reader.chunk_read.connect(self._consume_stdin_chunk)
-        self._stdin_reader.closed.connect(QtCore.QCoreApplication.quit)
+        self._stdin_reader.closed.connect(self._handle_stdin_closed)
         self._stdin_reader.start()
+        self._heartbeat_thread.start()
 
     def _emit(self, message_type: str, request_id: str, payload: dict[str, Any] | None = None) -> None:
-        sys.stdout.buffer.write(encode_message(message_type, request_id, payload))
-        sys.stdout.buffer.flush()
+        with self._emit_lock:
+            sys.stdout.buffer.write(encode_message(message_type, request_id, payload))
+            sys.stdout.buffer.flush()
+
+    def _heartbeat_loop(self) -> None:
+        while not self._heartbeat_stop.wait(2.0):
+            request_id = str(self._active_request_id or "")
+            if not request_id:
+                continue
+            self._emit("worker.heartbeat", request_id, {"busy": bool(self._busy)})
+
+    def _handle_stdin_closed(self) -> None:
+        self._heartbeat_stop.set()
+        QtCore.QCoreApplication.quit()
 
     def _consume_stdin_chunk(self, chunk: bytes) -> None:
         for message in self._buffer.push_bytes(chunk):
@@ -55,6 +73,7 @@ class ScanWorker(QtCore.QObject):
             self._emit("scan.failed", request_id, {"message": "Scan worker is busy.", "stderr": "", "exit_code": -1})
             return
         self._busy = True
+        self._active_request_id = request_id
         try:
             resolved = self._common_scan_paths_payload(request_id, payload)
             if resolved is None:
@@ -97,6 +116,7 @@ class ScanWorker(QtCore.QObject):
             )
         finally:
             self._busy = False
+            self._active_request_id = ""
 
     def _common_scan_paths_payload(self, request_id: str, payload: dict[str, Any]) -> tuple[str, str, Path, Path] | None:
         hip_path = str(payload.get("hip_path", "") or "").strip()
@@ -130,6 +150,7 @@ class ScanWorker(QtCore.QObject):
         if resolved is None:
             return
         self._busy = True
+        self._active_request_id = request_id
         try:
             hip_path, rop_path, hbatch_path, scripts_dir, hooks_dir = resolved
             probe_script_path = ensure_range_probe_script(
@@ -160,6 +181,7 @@ class ScanWorker(QtCore.QObject):
             self._emit("scan.failed", request_id, {"message": str(exc), "stderr": traceback.format_exc(), "exit_code": -1})
         finally:
             self._busy = False
+            self._active_request_id = ""
 
     def _handle_probe_strict_range(self, request_id: str, payload: dict[str, Any]) -> None:
         if self._busy:
@@ -169,6 +191,7 @@ class ScanWorker(QtCore.QObject):
         if resolved is None:
             return
         self._busy = True
+        self._active_request_id = request_id
         try:
             hip_path, rop_path, hbatch_path, scripts_dir, hooks_dir = resolved
             probe_script_path = ensure_range_probe_script(
@@ -188,6 +211,7 @@ class ScanWorker(QtCore.QObject):
             self._emit("scan.failed", request_id, {"message": str(exc), "stderr": traceback.format_exc(), "exit_code": -1})
         finally:
             self._busy = False
+            self._active_request_id = ""
 def main() -> int:
     app = QtCore.QCoreApplication(sys.argv)
     _worker = ScanWorker()

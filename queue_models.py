@@ -240,42 +240,59 @@ class RenderJob:
         object.__setattr__(self, name, value)
 
     def display_name(self) -> str:
-        if self.name.strip():
-            return self.name.strip()
-        hip_name = Path(self.hip_path).stem or "job"
-        rop_name = self.rop_path.rstrip("/").split("/")[-1] if self.rop_path else "rop"
+        if self.spec.name.strip():
+            return self.spec.name.strip()
+        hip_name = Path(self.spec.hip_path).stem or "job"
+        rop_name = self.spec.rop_path.rstrip("/").split("/")[-1] if self.spec.rop_path else "rop"
         return f"{hip_name} | {rop_name}"
 
     def frame_display(self) -> str:
-        if self.frame_range_mode == "override":
-            return f"{self.start_frame}-{self.end_frame}x{self.step}"
+        if self.spec.frame_range_mode == "override":
+            return f"{self.spec.start_frame}-{self.spec.end_frame}x{self.spec.step}"
         return "Use ROP"
 
     def frame_range_display(self) -> str:
-        if self.frame_range_mode == "override":
-            return f"{self.start_frame}-{self.end_frame}"
-        if self.runtime_start_frame is not None and self.runtime_end_frame is not None:
-            start = int(self.runtime_start_frame) if float(self.runtime_start_frame).is_integer() else self.runtime_start_frame
-            end = int(self.runtime_end_frame) if float(self.runtime_end_frame).is_integer() else self.runtime_end_frame
+        if self.spec.frame_range_mode == "override":
+            return f"{self.spec.start_frame}-{self.spec.end_frame}"
+        if self.runtime.runtime_start_frame is not None and self.runtime.runtime_end_frame is not None:
+            start = (
+                int(self.runtime.runtime_start_frame)
+                if float(self.runtime.runtime_start_frame).is_integer()
+                else self.runtime.runtime_start_frame
+            )
+            end = (
+                int(self.runtime.runtime_end_frame)
+                if float(self.runtime.runtime_end_frame).is_integer()
+                else self.runtime.runtime_end_frame
+            )
             return f"{start}-{end}"
         return "From ROP"
 
     def step_display(self) -> str:
-        if self.frame_range_mode == "override":
-            return str(self.step if self.step is not None else "-")
-        if self.runtime_step is not None:
-            step = int(self.runtime_step) if float(self.runtime_step).is_integer() else self.runtime_step
+        if self.spec.frame_range_mode == "override":
+            return str(self.spec.step if self.spec.step is not None else "-")
+        if self.runtime.runtime_step is not None:
+            step = (
+                int(self.runtime.runtime_step)
+                if float(self.runtime.runtime_step).is_integer()
+                else self.runtime.runtime_step
+            )
             return str(step)
         return "From ROP"
 
     def total_override_frames(self) -> int | None:
-        if self.frame_range_mode != "override":
+        if self.spec.frame_range_mode != "override":
             return None
-        if self.start_frame is None or self.end_frame is None or self.step is None or self.step <= 0:
+        if (
+            self.spec.start_frame is None
+            or self.spec.end_frame is None
+            or self.spec.step is None
+            or self.spec.step <= 0
+        ):
             return None
-        if self.end_frame < self.start_frame:
+        if self.spec.end_frame < self.spec.start_frame:
             return 0
-        return ((self.end_frame - self.start_frame) // self.step) + 1
+        return ((self.spec.end_frame - self.spec.start_frame) // self.spec.step) + 1
 
     def frame_handling_label(self) -> str:
-        return self.frame_handling_mode.label()
+        return self.spec.frame_handling_mode.label()

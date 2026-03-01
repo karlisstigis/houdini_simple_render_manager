@@ -5,11 +5,12 @@ import unittest
 from action_policy import (
     can_duplicate_jobs,
     can_edit_job,
+    can_edit_job_column,
     can_open_queue_file,
     can_remove_jobs,
-    can_retry_interrupted_jobs,
     can_scan_hip,
     is_job_runnable,
+    queue_row_status_label,
 )
 from queue_models import JobStatus, RenderJob
 
@@ -26,6 +27,14 @@ class ActionPolicyTests(unittest.TestCase):
         decision = can_edit_job(job, is_active_job=True)
         self.assertFalse(decision.allowed)
 
+    def test_can_edit_job_column_blocks_strict_range_columns(self) -> None:
+        job = RenderJob("a.hip", "/out/a", "use_rop")
+        job.strict_frame_range = True
+        decision = can_edit_job_column(job, column=3, is_active_job=False)
+        self.assertFalse(decision.allowed)
+        decision = can_edit_job_column(job, column=0, is_active_job=False)
+        self.assertTrue(decision.allowed)
+
     def test_can_remove_jobs_blocks_only_active(self) -> None:
         job = RenderJob("a.hip", "/out/a", "use_rop")
         decision = can_remove_jobs([job], is_active_job_fn=lambda target: True)
@@ -36,17 +45,15 @@ class ActionPolicyTests(unittest.TestCase):
         decision = can_duplicate_jobs([job], is_active_job_fn=lambda target: True, scan_in_progress=False)
         self.assertFalse(decision.allowed)
 
-    def test_can_retry_interrupted_jobs_requires_interrupted(self) -> None:
-        job = RenderJob("a.hip", "/out/a", "use_rop")
-        decision = can_retry_interrupted_jobs([job], is_active_job_fn=lambda target: False)
-        self.assertFalse(decision.allowed)
-        job.status = JobStatus.INTERRUPTED
-        decision = can_retry_interrupted_jobs([job], is_active_job_fn=lambda target: False)
-        self.assertTrue(decision.allowed)
-
     def test_can_open_queue_file_and_scan_hip(self) -> None:
         self.assertFalse(can_open_queue_file(queue_active=True, render_job_active=False, scan_in_progress=False).allowed)
         self.assertFalse(can_scan_hip(scan_in_progress=False, hbatch_exists=False).allowed)
+
+    def test_queue_row_status_label(self) -> None:
+        job = RenderJob("a.hip", "/out/a", "use_rop")
+        self.assertEqual(queue_row_status_label(job), JobStatus.QUEUED.value)
+        job.enabled = False
+        self.assertEqual(queue_row_status_label(job), "Disabled")
 
 
 if __name__ == "__main__":

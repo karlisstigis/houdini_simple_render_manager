@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from queue_editing import apply_queue_path_text
+from queue_models import RenderJob
 from rop_metadata import RopInfo, apply_rop_info_to_job as apply_rop_info_to_job_model
 
 
@@ -25,16 +26,16 @@ def validate_queue_path_value(column: int, text: str) -> str:
 
 
 def sync_job_after_path_change(
-    job: Any,
+    job: RenderJob,
     *,
     probe_cache: dict[tuple[str, str], RopInfo | None],
     probe_rop_info: Callable[[str, str], RopInfo | None],
-    mark_job_offline: Callable[[Any, str | None], None],
-    restore_job_online_status: Callable[[Any], None],
+    mark_job_offline: Callable[[RenderJob, str | None], None],
+    restore_job_online_status: Callable[[RenderJob], None],
     normalize_output_display_path: Callable[[str], str],
 ) -> None:
-    hip_path = str(job.hip_path or "").strip()
-    rop_path = str(job.rop_path or "").strip()
+    hip_path = str(job.spec.hip_path or "").strip()
+    rop_path = str(job.spec.rop_path or "").strip()
     if not hip_path or not Path(hip_path).exists():
         mark_job_offline(job, "HIP file not found.")
         return
@@ -57,14 +58,14 @@ def sync_job_after_path_change(
 
 
 def propagate_hip_path_change(
-    jobs: list[Any],
+    jobs: list[RenderJob],
     *,
     old_hip: str,
     new_hip: str,
     running_status: Any,
     probe_rop_info: Callable[[str, str], RopInfo | None],
-    mark_job_offline: Callable[[Any, str | None], None],
-    restore_job_online_status: Callable[[Any], None],
+    mark_job_offline: Callable[[RenderJob, str | None], None],
+    restore_job_online_status: Callable[[RenderJob], None],
     normalize_output_display_path: Callable[[str], str],
 ) -> list[str]:
     old_key = str(old_hip or "").strip()
@@ -72,9 +73,9 @@ def propagate_hip_path_change(
     probe_cache: dict[tuple[str, str], RopInfo | None] = {}
     changed_ids: list[str] = []
     for job in jobs:
-        if job.status == running_status:
+        if job.runtime.status == running_status:
             continue
-        if str(job.hip_path or "").strip() != old_key:
+        if str(job.spec.hip_path or "").strip() != old_key:
             continue
         try:
             apply_queue_path_text(job, 1, new_key)
@@ -93,15 +94,15 @@ def propagate_hip_path_change(
 
 
 def propagate_rop_path_change(
-    jobs: list[Any],
+    jobs: list[RenderJob],
     *,
     hip_path: str,
     old_rop: str,
     new_rop: str,
     running_status: Any,
     probe_rop_info: Callable[[str, str], RopInfo | None],
-    mark_job_offline: Callable[[Any, str | None], None],
-    restore_job_online_status: Callable[[Any], None],
+    mark_job_offline: Callable[[RenderJob, str | None], None],
+    restore_job_online_status: Callable[[RenderJob], None],
     normalize_output_display_path: Callable[[str], str],
 ) -> list[str]:
     hip_key = str(hip_path or "").strip()
@@ -110,11 +111,11 @@ def propagate_rop_path_change(
     probe_cache: dict[tuple[str, str], RopInfo | None] = {}
     changed_ids: list[str] = []
     for job in jobs:
-        if job.status == running_status:
+        if job.runtime.status == running_status:
             continue
-        if str(job.hip_path or "").strip() != hip_key:
+        if str(job.spec.hip_path or "").strip() != hip_key:
             continue
-        if str(job.rop_path or "").strip() != old_key:
+        if str(job.spec.rop_path or "").strip() != old_key:
             continue
         try:
             apply_queue_path_text(job, 2, new_key)
@@ -133,23 +134,23 @@ def propagate_rop_path_change(
 
 
 def refresh_jobs_from_rop_metadata(
-    target_jobs: list[Any],
+    target_jobs: list[RenderJob],
     *,
     running_status: Any,
     scan_rop_info_for_hip: Callable[[str], dict[str, RopInfo]],
     probe_rop_info: Callable[[str, str], RopInfo | None],
-    mark_job_offline: Callable[[Any, str | None], None],
-    restore_job_online_status: Callable[[Any], None],
-    clear_job_resume_runtime_state: Callable[[Any], None],
+    mark_job_offline: Callable[[RenderJob, str | None], None],
+    restore_job_online_status: Callable[[RenderJob], None],
+    clear_job_resume_runtime_state: Callable[[RenderJob], None],
     normalize_output_display_path: Callable[[str], str],
     reset_override_to_rop: bool = False,
 ) -> list[str]:
     changed_ids: list[str] = []
-    by_hip: dict[str, list[Any]] = {}
+    by_hip: dict[str, list[RenderJob]] = {}
     for target in target_jobs:
-        if target.status == running_status:
+        if target.runtime.status == running_status:
             continue
-        by_hip.setdefault(target.hip_path, []).append(target)
+        by_hip.setdefault(target.spec.hip_path, []).append(target)
 
     for hip_path, hip_jobs in by_hip.items():
         if not Path(hip_path).exists():
@@ -160,11 +161,11 @@ def refresh_jobs_from_rop_metadata(
         scan_info_map = scan_rop_info_for_hip(hip_path)
         single_probe_cache: dict[str, RopInfo | None] = {}
         for target in hip_jobs:
-            info = scan_info_map.get(target.rop_path)
+            info = scan_info_map.get(target.spec.rop_path)
             if info is None:
-                if target.rop_path not in single_probe_cache:
-                    single_probe_cache[target.rop_path] = probe_rop_info(target.hip_path, target.rop_path)
-                info = single_probe_cache[target.rop_path]
+                if target.spec.rop_path not in single_probe_cache:
+                    single_probe_cache[target.spec.rop_path] = probe_rop_info(target.spec.hip_path, target.spec.rop_path)
+                info = single_probe_cache[target.spec.rop_path]
             if info is None:
                 continue
             if info.error == "node_not_found":
@@ -172,10 +173,10 @@ def refresh_jobs_from_rop_metadata(
                 changed_ids.append(target.id)
                 continue
             if reset_override_to_rop:
-                target.frame_range_mode = "use_rop"
-                target.start_frame = None
-                target.end_frame = None
-                target.step = None
+                target.spec.frame_range_mode = "use_rop"
+                target.spec.start_frame = None
+                target.spec.end_frame = None
+                target.spec.step = None
                 clear_job_resume_runtime_state(target)
             apply_rop_info_to_job_model(
                 target,

@@ -28,6 +28,17 @@ def can_edit_job(job: Any | None, *, is_active_job: bool) -> ActionDecision:
     return ActionDecision(True)
 
 
+def can_edit_job_column(job: Any | None, *, column: int, is_active_job: bool) -> ActionDecision:
+    base = can_edit_job(job, is_active_job=is_active_job)
+    if not base.allowed:
+        return base
+    if column in {3, 4} and bool(getattr(job, "strict_frame_range", False)):
+        return ActionDecision(False, "Cannot edit frame range on a strict-range ROP.")
+    if column in {0, 1, 2, 3, 4, 5}:
+        return ActionDecision(True)
+    return ActionDecision(False, "This column is not editable.")
+
+
 def can_remove_jobs(jobs: list[Any], *, is_active_job_fn) -> ActionDecision:
     if not jobs:
         return ActionDecision(False, "No jobs selected.")
@@ -48,15 +59,10 @@ def can_duplicate_jobs(jobs: list[Any], *, is_active_job_fn, scan_in_progress: b
     return ActionDecision(True)
 
 
-def can_retry_interrupted_jobs(jobs: list[Any], *, is_active_job_fn) -> ActionDecision:
-    if not jobs:
-        return ActionDecision(False, "No jobs selected.")
-    interrupted = [job for job in jobs if getattr(job, "status", None) == JobStatus.INTERRUPTED]
-    if not interrupted:
-        return ActionDecision(False, "No interrupted jobs selected.")
-    if all(is_active_job_fn(job) for job in interrupted):
-        return ActionDecision(False, "Cannot retry the active running job.")
-    return ActionDecision(True)
+def queue_row_status_label(job: Any) -> str:
+    if job is None:
+        return ""
+    return "Disabled" if not getattr(job, "enabled", False) else str(getattr(getattr(job, "status", None), "value", ""))
 
 
 def can_open_queue_file(*, queue_active: bool, render_job_active: bool, scan_in_progress: bool) -> ActionDecision:

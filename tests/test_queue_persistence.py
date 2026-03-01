@@ -30,35 +30,35 @@ class QueuePersistenceTests(unittest.TestCase):
             status=JobStatus.FAILED,
             frame_handling_mode=FrameHandlingMode.OVERWRITE,
         )
-        job.error_summary = "boom"
-        job.runtime_start_frame = 1001
-        job.runtime_end_frame = 1010
-        job.runtime_step = 2
+        job.runtime.error_summary = "boom"
+        job.runtime.runtime_start_frame = 1001
+        job.runtime.runtime_end_frame = 1010
+        job.runtime.runtime_step = 2
         cloned = job_from_persisted_dict(job_to_persisted_dict(job))
         self.assertIsNotNone(cloned)
         assert cloned is not None
-        self.assertEqual(cloned.id, job.id)
-        self.assertEqual(cloned.hip_path, job.hip_path)
-        self.assertEqual(cloned.rop_path, job.rop_path)
-        self.assertEqual(cloned.status, job.status)
-        self.assertEqual(cloned.frame_handling_mode, job.frame_handling_mode)
-        self.assertEqual(cloned.error_summary, "boom")
+        self.assertEqual(cloned.spec.id, job.spec.id)
+        self.assertEqual(cloned.spec.hip_path, job.spec.hip_path)
+        self.assertEqual(cloned.spec.rop_path, job.spec.rop_path)
+        self.assertEqual(cloned.runtime.status, job.runtime.status)
+        self.assertEqual(cloned.spec.frame_handling_mode, job.spec.frame_handling_mode)
+        self.assertEqual(cloned.runtime.error_summary, "boom")
 
     def test_running_job_loads_back_as_canceled(self) -> None:
         job = RenderJob(hip_path="E:/shot/test.hip", rop_path="/out/mantra1", frame_range_mode="use_rop", status=JobStatus.RUNNING)
         loaded = job_from_persisted_dict(job_to_persisted_dict(job))
         self.assertIsNotNone(loaded)
         assert loaded is not None
-        self.assertEqual(loaded.status, JobStatus.INTERRUPTED)
+        self.assertEqual(loaded.runtime.status, JobStatus.INTERRUPTED)
 
     def test_active_job_id_loads_back_as_interrupted(self) -> None:
         job = RenderJob(hip_path="E:/shot/test.hip", rop_path="/out/mantra1", frame_range_mode="use_rop", status=JobStatus.QUEUED)
         loaded = job_from_persisted_dict(job_to_persisted_dict(job), active_job_id=job.id)
         self.assertIsNotNone(loaded)
         assert loaded is not None
-        self.assertEqual(loaded.status, JobStatus.INTERRUPTED)
-        self.assertTrue(loaded.interrupted_reason)
-        self.assertIn("active", loaded.interrupted_reason.lower())
+        self.assertEqual(loaded.runtime.status, JobStatus.INTERRUPTED)
+        self.assertTrue(loaded.runtime.interrupted_reason)
+        self.assertIn("active", loaded.runtime.interrupted_reason.lower())
 
     def test_save_and_load_queue_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -99,12 +99,12 @@ class QueuePersistenceTests(unittest.TestCase):
 
     def test_interrupted_reason_includes_chunk_context(self) -> None:
         job = RenderJob(hip_path="E:/shot/test.hip", rop_path="/out/mantra1", frame_range_mode="use_rop", status=JobStatus.RUNNING)
-        job.chunk_index_runtime = 1
-        job.chunk_total_runtime = 3
+        job.runtime.chunk_index_runtime = 1
+        job.runtime.chunk_total_runtime = 3
         loaded = job_from_persisted_dict(job_to_persisted_dict(job))
         self.assertIsNotNone(loaded)
         assert loaded is not None
-        self.assertIn("chunk 2/3", loaded.interrupted_reason.lower())
+        self.assertIn("chunk 2/3", loaded.runtime.interrupted_reason.lower())
 
     def test_job_transform_helpers(self) -> None:
         a = RenderJob(hip_path="a.hip", rop_path="/out/a", frame_range_mode="use_rop")

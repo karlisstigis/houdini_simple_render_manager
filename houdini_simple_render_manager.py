@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 import sys
 import traceback
 from datetime import datetime
@@ -13,10 +14,11 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from action_policy import (
     can_duplicate_jobs,
     can_edit_job,
+    can_edit_job_column,
     can_open_queue_file,
     can_remove_jobs,
-    can_retry_interrupted_jobs,
     is_job_runnable,
+    queue_row_status_label,
 )
 from atomic_io import read_json_file, write_json_atomic
 from houdini_service import (
@@ -270,6 +272,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_render_request_id = ""
         self._active_scan_request_id = ""
         self._render_finished_message_received = False
+        self._active_hbatch_pid = 0
         self._pending_queue_refresh_args: dict[str, Any] | None = None
         self._pending_queue_refresh_timer = QtCore.QTimer(self)
         self._pending_queue_refresh_timer.setSingleShot(True)
@@ -288,6 +291,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._main_splitter_left_width_pref: int | None = None
         self._main_splitter_left_collapsed = False
         self._applying_main_splitter_width = False
+        self._left_notifications_height_pref: int | None = None
         self.scan_worker_client = ScanWorkerClient(
             worker_python_path=self._worker_python_path(),
             worker_script_path=self._worker_script_path("scan_worker.py"),
@@ -389,24 +393,14 @@ class MainWindow(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         root = QtWidgets.QVBoxLayout(central)
-        top_area = QtWidgets.QWidget()
-        top_layout = QtWidgets.QVBoxLayout(top_area)
-        top_layout.setContentsMargins(0, 0, 0, 0)
 
         self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         self.main_splitter.addWidget(self._build_left_panel())
-        self.main_splitter.addWidget(self._build_queue_panel())
+        self.main_splitter.addWidget(self._build_right_panel())
         self.main_splitter.setStretchFactor(0, 2)
         self.main_splitter.setStretchFactor(1, 3)
         self.main_splitter.splitterMoved.connect(self._on_main_splitter_moved)
-        top_layout.addWidget(self.main_splitter, stretch=1)
-
-        self.main_vertical_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        self.main_vertical_splitter.addWidget(top_area)
-        self.main_vertical_splitter.addWidget(self._build_log_panel())
-        self.main_vertical_splitter.setStretchFactor(0, 4)
-        self.main_vertical_splitter.setStretchFactor(1, 2)
-        root.addWidget(self.main_vertical_splitter, stretch=1)
+        root.addWidget(self.main_splitter, stretch=1)
         root.addWidget(self._build_bottom_bar())
         self.statusBar().hide()
         self._set_status_message(self._status_default_message)
@@ -420,6 +414,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._left_splitter_top_height_pref = int(saved_top_height) if saved_top_height is not None else None
         except Exception:
             self._left_splitter_top_height_pref = None
+        saved_notifications_height = self.config.get("left_notifications_height")
+        try:
+            self._left_notifications_height_pref = int(saved_notifications_height) if saved_notifications_height is not None else None
+        except Exception:
+            self._left_notifications_height_pref = None
         QtCore.QTimer.singleShot(0, self._apply_main_splitter_left_width_pref)
         QtCore.QTimer.singleShot(0, self._apply_left_splitter_default_sizes)
 
@@ -652,6 +651,25 @@ class MainWindow(QtWidgets.QMainWindow):
         bottom_target = max(1, total_height - top_target)
         splitter.setSizes([top_target, bottom_target])
 
+    def _apply_left_column_splitter_default_sizes(self) -> None:
+        splitter = getattr(self, "left_column_splitter", None)
+        notifications_panel = getattr(self, "notifications_frame", None)
+        if splitter is None or notifications_panel is None:
+            return
+        total_height = splitter.height()
+        if total_height <= 0:
+            total_height = splitter.sizeHint().height()
+        if total_height <= 0:
+            return
+        preferred_bottom = getattr(self, "_left_notifications_height_pref", None)
+        bottom_target = preferred_bottom if preferred_bottom is not None else max(
+            notifications_panel.minimumSizeHint().height(),
+            min(170, notifications_panel.sizeHint().height()),
+        )
+        bottom_target = max(80, min(bottom_target, max(80, total_height - 160)))
+        top_target = max(120, total_height - bottom_target)
+        splitter.setSizes([top_target, bottom_target])
+
     def _on_left_splitter_moved(self, _pos: int, _index: int) -> None:
         splitter = getattr(self, "left_vertical_splitter", None)
         if splitter is None:
@@ -659,6 +677,14 @@ class MainWindow(QtWidgets.QMainWindow):
         sizes = splitter.sizes()
         if len(sizes) >= 2:
             self._left_splitter_top_height_pref = int(max(0, sizes[0]))
+
+    def _on_left_column_splitter_moved(self, _pos: int, _index: int) -> None:
+        splitter = getattr(self, "left_column_splitter", None)
+        if splitter is None:
+            return
+        sizes = splitter.sizes()
+        if len(sizes) >= 2:
+            self._left_notifications_height_pref = int(max(0, sizes[1]))
 
     def _chunking_enabled(self) -> bool:
         return bool(getattr(self, "chk_enable_chunking", None) and self.chk_enable_chunking.isChecked())
@@ -734,11 +760,11 @@ class MainWindow(QtWidgets.QMainWindow):
         return expanded
 
     def _job_phase_display(self, job: RenderJob) -> str:
-        phase = (job.phase_text or "").strip()
-        if job.chunk_total_runtime > 1:
-            chunk_part = f"Chunk {max(1, job.chunk_index_runtime + 1)}/{job.chunk_total_runtime}"
-            if job.chunk_attempt_runtime > 1:
-                chunk_part += f" r{job.chunk_attempt_runtime}"
+        phase = (job.view.phase_text or "").strip()
+        if job.runtime.chunk_total_runtime > 1:
+            chunk_part = f"Chunk {max(1, job.runtime.chunk_index_runtime + 1)}/{job.runtime.chunk_total_runtime}"
+            if job.runtime.chunk_attempt_runtime > 1:
+                chunk_part += f" r{job.runtime.chunk_attempt_runtime}"
             if phase:
                 return f"{phase} ({chunk_part})"
             return chunk_part
@@ -872,14 +898,58 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
+        top_host = QtWidgets.QWidget()
+        top_layout = QtWidgets.QVBoxLayout(top_host)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(6)
         self.left_vertical_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         self.left_vertical_splitter.addWidget(self._build_job_create_panel())
         self.left_vertical_splitter.addWidget(self._build_tree_view_panel())
         self.left_vertical_splitter.setStretchFactor(0, 4)
         self.left_vertical_splitter.setStretchFactor(1, 2)
         self.left_vertical_splitter.splitterMoved.connect(self._on_left_splitter_moved)
-        layout.addWidget(self.left_vertical_splitter, 1)
+        top_layout.addWidget(self.left_vertical_splitter, 1)
+
+        self.left_column_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.left_column_splitter.addWidget(top_host)
+        self.left_column_splitter.addWidget(self._build_notifications_panel())
+        self.left_column_splitter.setStretchFactor(0, 5)
+        self.left_column_splitter.setStretchFactor(1, 2)
+        self.left_column_splitter.splitterMoved.connect(self._on_left_column_splitter_moved)
+        layout.addWidget(self.left_column_splitter, 1)
         return host
+
+    def _build_notifications_panel(self) -> QtWidgets.QWidget:
+        box = QtWidgets.QGroupBox("Notifications")
+        layout = QtWidgets.QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        controls_row = QtWidgets.QHBoxLayout()
+        controls_row.setContentsMargins(8, 8, 8, 8)
+        controls_row.setSpacing(8)
+        controls_row.addWidget(QtWidgets.QLabel("Recent events"))
+        controls_row.addStretch(1)
+        self.btn_clear_notifications = QtWidgets.QPushButton("Clear")
+        self.btn_clear_notifications.clicked.connect(self._clear_notifications_view_only)
+        controls_row.addWidget(self.btn_clear_notifications)
+        layout.addLayout(controls_row)
+
+        self.notifications_list = QtWidgets.QListWidget()
+        self.notifications_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.notifications_list.setAlternatingRowColors(True)
+        self.notifications_list.setUniformItemSizes(False)
+        self.notifications_list.setWordWrap(True)
+        self.notifications_list.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.notifications_list.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.notifications_list.verticalScrollBar().setSingleStep(20)
+        layout.addWidget(self.notifications_list, 1)
+
+        box.setObjectName("panelEmbeddedGroup")
+        box.setTitle("")
+        self.notifications_frame = PanelFrame("Notifications", box)
+        self.notifications_frame.set_body_margins(0, 0, 0, 0)
+        return self.notifications_frame
 
     def _build_tree_view_panel(self) -> QtWidgets.QWidget:
         panel, self.queue_tree, self.queue_tree_model = build_queue_tree_panel_model(
@@ -1084,6 +1154,20 @@ class MainWindow(QtWidgets.QMainWindow):
         panel.set_body_margins(0, 0, 0, 0)
         return panel
 
+    def _build_right_panel(self) -> QtWidgets.QWidget:
+        host = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.right_vertical_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.right_vertical_splitter.addWidget(self._build_queue_panel())
+        self.right_vertical_splitter.addWidget(self._build_log_panel())
+        self.right_vertical_splitter.setStretchFactor(0, 4)
+        self.right_vertical_splitter.setStretchFactor(1, 2)
+        layout.addWidget(self.right_vertical_splitter, 1)
+        return host
+
     def _build_log_panel(self) -> QtWidgets.QWidget:
         box = QtWidgets.QGroupBox("Logs")
         layout = QtWidgets.QVBoxLayout(box)
@@ -1222,7 +1306,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._reset_queue_view_to_defaults()
             self._apply_queue_view_from_persisted_data(queue_view)
             self._clear_history()
-            interrupted_count = sum(1 for job in self.jobs if job.status == JobStatus.INTERRUPTED)
+            interrupted_count = sum(1 for job in self.jobs if job.runtime.status == JobStatus.INTERRUPTED)
             if self.jobs:
                 self._refresh_queue_table(select_row=0)
             else:
@@ -1257,8 +1341,12 @@ class MainWindow(QtWidgets.QMainWindow):
         panel_gap = int(t.get("panel_gap", 6))
         if hasattr(self, "main_splitter"):
             self.main_splitter.setHandleWidth(panel_gap)
-        if hasattr(self, "main_vertical_splitter"):
-            self.main_vertical_splitter.setHandleWidth(panel_gap)
+        if hasattr(self, "left_vertical_splitter"):
+            self.left_vertical_splitter.setHandleWidth(panel_gap)
+        if hasattr(self, "left_column_splitter"):
+            self.left_column_splitter.setHandleWidth(panel_gap)
+        if hasattr(self, "right_vertical_splitter"):
+            self.right_vertical_splitter.setHandleWidth(panel_gap)
         if hasattr(self, "queue_table"):
             self.queue_table.selection_line_color = QtGui.QColor(t["selection_line"])
             self.queue_table.selection_row_color = QtGui.QColor(t["selection_row"])
@@ -1305,32 +1393,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
 
             if hasattr(self, "add_job_panel"):
-                strict_hint = self.add_job_panel.rop_strict_frame_range_for_path(job.rop_path)
-                job.strict_frame_range = bool(strict_hint)
-                output_hint = self.add_job_panel.rop_output_path_for_path(job.rop_path)
+                strict_hint = self.add_job_panel.rop_strict_frame_range_for_path(job.spec.rop_path)
+                job.spec.strict_frame_range = bool(strict_hint)
+                output_hint = self.add_job_panel.rop_output_path_for_path(job.spec.rop_path)
                 if output_hint:
-                    job.out_file_sample_path = output_hint
-                    job.out_path = self._normalize_output_display_path(output_hint)
-                rs, re_, rstep = self.add_job_panel.rop_range_info_for_path(job.rop_path)
+                    job.view.out_file_sample_path = output_hint
+                    job.view.out_path = self._normalize_output_display_path(output_hint)
+                rs, re_, rstep = self.add_job_panel.rop_range_info_for_path(job.spec.rop_path)
                 if rs is not None and re_ is not None:
-                    job.runtime_start_frame = rs
-                    job.runtime_end_frame = re_
-                    job.runtime_step = rstep
+                    job.runtime.runtime_start_frame = rs
+                    job.runtime.runtime_end_frame = re_
+                    job.runtime.runtime_step = rstep
 
-            if job.frame_range_mode == "use_rop":
-                if job.runtime_start_frame is None or job.runtime_end_frame is None:
+            if job.spec.frame_range_mode == "use_rop":
+                if job.runtime.runtime_start_frame is None or job.runtime.runtime_end_frame is None:
                     probe_err = self._probe_and_apply_job_rop_metadata(job)
                     if probe_err == "node_not_found":
                         self._mark_job_offline(job, "ROP node not found in HIP file.")
                     elif probe_err:
-                        self._append_log("Stderr", f"[Add Job] Could not resolve ROP range for {job.rop_path}: {probe_err}\n")
+                        self._append_log("Stderr", f"[Add Job] Could not resolve ROP range for {job.spec.rop_path}: {probe_err}\n")
 
-            if job.frame_range_mode == "override":
-                strict_probe = self._probe_rop_strict_frame_range(job.hip_path, job.rop_path)
+            if job.spec.frame_range_mode == "override":
+                strict_probe = self._probe_rop_strict_frame_range(job.spec.hip_path, job.spec.rop_path)
                 if strict_probe is not None and hasattr(self, "add_job_panel"):
-                    self.add_job_panel.set_rop_strict_frame_range_hint(job.rop_path, strict_probe)
-                    job.strict_frame_range = bool(strict_probe)
-                if job.strict_frame_range:
+                    self.add_job_panel.set_rop_strict_frame_range_hint(job.spec.rop_path, strict_probe)
+                    job.spec.strict_frame_range = bool(strict_probe)
+                if job.spec.strict_frame_range:
                     return
 
             new_jobs.append(job)
@@ -1341,7 +1429,7 @@ class MainWindow(QtWidgets.QMainWindow):
         insert_start = len(self.jobs)
         self.jobs.extend(new_jobs)
         for job in new_jobs:
-            self.add_job_panel.push_recents_from_job(job.hip_path, job.rop_path)
+            self.add_job_panel.push_recents_from_job(job.spec.hip_path, job.spec.rop_path)
         self._push_history_command(
             {
                 "kind": "insert_jobs",
@@ -1401,10 +1489,10 @@ class MainWindow(QtWidgets.QMainWindow):
             step=step,
             name=name,
         )
-        job.log_file_path = str(self.config.new_job_log_path(job.display_name()))
-        job.phase_text = ""
-        job.progress_text = "-"
-        job.percent_text = "-"
+        job.runtime.log_file_path = str(self.config.new_job_log_path(job.display_name()))
+        job.view.phase_text = ""
+        job.view.progress_text = "-"
+        job.view.percent_text = "-"
         return job
 
     def _probe_rop_info(self, hip_path: str, rop_path: str) -> RopInfo | None:
@@ -1446,7 +1534,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_render_preflight_script(self, job: RenderJob, disable_husk_mplay: bool, hook_paths: dict[str, str]) -> str:
         return build_render_preflight_script_model(
             scripts_dir=self._project_houdini_scripts_dir(),
-            rop_path=job.rop_path,
+            rop_path=job.spec.rop_path,
             disable_husk_mplay=disable_husk_mplay,
             hook_paths=hook_paths,
         )
@@ -1530,49 +1618,25 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._is_active_job(job):
                 continue
             before = (
-                job.status,
-                job.error_summary,
+                job.runtime.status,
+                job.runtime.error_summary,
                 job.interrupted_reason,
-                job.started_at,
-                job.finished_at,
+                job.runtime.started_at,
+                job.runtime.finished_at,
                 job.exit_code,
             )
             self._reset_job_state(job)
             after = (
-                job.status,
-                job.error_summary,
+                job.runtime.status,
+                job.runtime.error_summary,
                 job.interrupted_reason,
-                job.started_at,
-                job.finished_at,
+                job.runtime.started_at,
+                job.runtime.finished_at,
                 job.exit_code,
             )
             if before != after:
                 changed_ids.append(job.id)
         return changed_ids
-
-    def _reset_interrupted_jobs(self, target_jobs: list[RenderJob]) -> None:
-        retry_decision = can_retry_interrupted_jobs(target_jobs, is_active_job_fn=self._is_active_job)
-        if not retry_decision.allowed:
-            return
-        interrupted = [job for job in target_jobs if job.status == JobStatus.INTERRUPTED and not self._is_active_job(job)]
-        if not interrupted:
-            return
-        target_ids = [job.id for job in interrupted]
-        before_states = self._job_states_for_ids(target_ids)
-        changed_ids = self._reset_jobs_to_queued(interrupted)
-        if not changed_ids:
-            return
-        after_states = self._job_states_for_ids(changed_ids)
-        self._push_history_command(
-            {
-                "kind": "update_jobs",
-                "before": before_states,
-                "after": after_states,
-                "undo_select_job_ids": target_ids,
-                "redo_select_job_ids": changed_ids,
-            }
-        )
-        self._save_and_refresh_queue(select_job_ids=changed_ids)
 
     @staticmethod
     def _clear_job_resume_runtime_state(job: RenderJob) -> None:
@@ -1623,8 +1687,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not hip_path:
             return []
         if kind == "rop" and rop_path:
-            return [job for job in self.jobs if job.hip_path == hip_path and job.rop_path == rop_path]
-        return [job for job in self.jobs if job.hip_path == hip_path]
+            return [job for job in self.jobs if job.spec.hip_path == hip_path and job.spec.rop_path == rop_path]
+        return [job for job in self.jobs if job.spec.hip_path == hip_path]
 
     def _show_queue_tree_context_menu(self, pos: QtCore.QPoint) -> None:
         if not hasattr(self, "queue_tree") or self.queue_tree is None:
@@ -1731,7 +1795,7 @@ class MainWindow(QtWidgets.QMainWindow):
             old_hip = str(item.data(TREE_HIP_ROLE) or "").strip()
             old_rop = str(item.data(TREE_ROP_ROLE) or "").strip()
             if kind == "hip":
-                target_ids = [job.id for job in self.jobs if job.hip_path == old_hip]
+                target_ids = [job.id for job in self.jobs if job.spec.hip_path == old_hip]
                 before_states = self._job_states_for_ids(target_ids)
                 if not text:
                     self._defer_refresh_queue_tree_view()
@@ -1757,7 +1821,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._defer_save_and_refresh_queue(changed_ids)
                 return
             if kind == "rop":
-                target_ids = [job.id for job in self.jobs if job.hip_path == old_hip and job.rop_path == old_rop]
+                target_ids = [job.id for job in self.jobs if job.spec.hip_path == old_hip and job.spec.rop_path == old_rop]
                 before_states = self._job_states_for_ids(target_ids)
                 if not text:
                     self._defer_refresh_queue_tree_view()
@@ -1788,44 +1852,44 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _job_can_reset_cached_cell(job: RenderJob, col: int) -> bool:
-        if job.status == JobStatus.RUNNING:
+        if job.runtime.status == JobStatus.RUNNING:
             return False
         if col == 3:
             return (
-                job.runtime_start_frame is not None
-                and job.runtime_end_frame is not None
-                and not job.strict_frame_range
+                job.runtime.runtime_start_frame is not None
+                and job.runtime.runtime_end_frame is not None
+                and not job.spec.strict_frame_range
             )
         if col == 4:
-            return (job.runtime_step not in (None, 0)) and (not job.strict_frame_range)
+            return (job.runtime.runtime_step not in (None, 0)) and (not job.spec.strict_frame_range)
         return False
 
     @staticmethod
     def _normalize_job_override_mode_against_cached(job: RenderJob) -> None:
-        if job.frame_range_mode != "override":
+        if job.spec.frame_range_mode != "override":
             return
         if (
-            job.runtime_start_frame is None
-            or job.runtime_end_frame is None
-            or job.runtime_step in (None, 0)
-            or job.start_frame is None
-            or job.end_frame is None
-            or job.step is None
+            job.runtime.runtime_start_frame is None
+            or job.runtime.runtime_end_frame is None
+            or job.runtime.runtime_step in (None, 0)
+            or job.spec.start_frame is None
+            or job.spec.end_frame is None
+            or job.spec.step is None
         ):
             return
         try:
             matches_range = (
-                int(job.start_frame) == int(float(job.runtime_start_frame))
-                and int(job.end_frame) == int(float(job.runtime_end_frame))
+                int(job.spec.start_frame) == int(float(job.runtime.runtime_start_frame))
+                and int(job.spec.end_frame) == int(float(job.runtime.runtime_end_frame))
             )
-            matches_step = int(job.step) == int(float(job.runtime_step))
+            matches_step = int(job.spec.step) == int(float(job.runtime.runtime_step))
         except Exception:
             return
         if matches_range and matches_step:
-            job.frame_range_mode = "use_rop"
-            job.start_frame = None
-            job.end_frame = None
-            job.step = None
+            job.spec.frame_range_mode = "use_rop"
+            job.spec.start_frame = None
+            job.spec.end_frame = None
+            job.spec.step = None
 
     @staticmethod
     def _queue_edit_frame_text_for_job(job: RenderJob) -> str:
@@ -1879,9 +1943,9 @@ class MainWindow(QtWidgets.QMainWindow):
         any_active = any(j.status == JobStatus.RUNNING and self.current_job_id == j.id for j in target_jobs)
 
         menu = QtWidgets.QMenu(self)
-        out_folder = self._output_folder_from_value(job.out_path)
-        has_finished_jobs = any(j.status in {JobStatus.DONE, JobStatus.FAILED} for j in self.jobs)
-        act_toggle = menu.addAction("Disable" if job.enabled else "Enable")
+        out_folder = self._output_folder_from_value(job.view.out_path)
+        has_finished_jobs = any(j.runtime.status in {JobStatus.DONE, JobStatus.FAILED} for j in self.jobs)
+        act_toggle = menu.addAction("Disable" if job.spec.enabled else "Enable")
         act_toggle.setEnabled(not any_active)
         act_reset = menu.addAction("Reset State")
         act_reset.setEnabled(not any_active)
@@ -1892,10 +1956,6 @@ class MainWindow(QtWidgets.QMainWindow):
             act_reset_cell_cached.setEnabled(any(self._job_can_reset_cached_cell(t, idx.column()) for t in target_jobs))
         act_reload_from_rop = menu.addAction("Reload from File")
         act_reload_from_rop.setEnabled(bool((not any_active) and self._hbatch_exists()))
-        retry_decision = can_retry_interrupted_jobs(target_jobs, is_active_job_fn=self._is_active_job)
-        act_retry_interrupted = None
-        if retry_decision.allowed:
-            act_retry_interrupted = menu.addAction("Retry Interrupted")
         menu.addSeparator()
         duplicate_decision = can_duplicate_jobs(
             target_jobs,
@@ -1922,7 +1982,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif chosen == act_open_folder and out_folder is not None:
             QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(out_folder)))
         elif chosen == act_toggle:
-            new_enabled = not job.enabled
+            new_enabled = not job.spec.enabled
             target_ids = [j.id for j in target_jobs]
             before_states = self._job_states_for_ids(target_ids)
             for target in target_jobs:
@@ -1987,8 +2047,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     }
                 )
                 self._save_and_refresh_queue(select_job_ids=[j.id for j in target_jobs])
-        elif chosen == act_retry_interrupted:
-            self._reset_interrupted_jobs(target_jobs)
         elif chosen == act_duplicate:
             self._duplicate_selected_jobs()
         elif chosen == act_remove:
@@ -1999,19 +2057,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def _resolve_job_range_for_execution(
         self, job: RenderJob, *, mutate_job: bool = True
     ) -> tuple[int, int, int] | None:
-        if job.frame_range_mode == "override":
-            if job.start_frame is None or job.end_frame is None:
+        if job.spec.frame_range_mode == "override":
+            if job.spec.start_frame is None or job.spec.end_frame is None:
                 return None
-            return int(job.start_frame), int(job.end_frame), int(job.step or 1)
+            return int(job.spec.start_frame), int(job.spec.end_frame), int(job.spec.step or 1)
         if (
-            job.runtime_start_frame is not None
-            and job.runtime_end_frame is not None
-            and job.runtime_step not in (None, 0)
+            job.runtime.runtime_start_frame is not None
+            and job.runtime.runtime_end_frame is not None
+            and job.runtime.runtime_step not in (None, 0)
         ):
             return (
-                int(job.runtime_start_frame),
-                int(job.runtime_end_frame),
-                int(job.runtime_step),
+                int(job.runtime.runtime_start_frame),
+                int(job.runtime.runtime_end_frame),
+                int(job.runtime.runtime_step),
             )
         if mutate_job:
             err = self._probe_and_apply_job_rop_metadata(job)
@@ -2022,17 +2080,17 @@ class MainWindow(QtWidgets.QMainWindow):
             if err:
                 return None
             if (
-                job.runtime_start_frame is not None
-                and job.runtime_end_frame is not None
-                and job.runtime_step not in (None, 0)
+                job.runtime.runtime_start_frame is not None
+                and job.runtime.runtime_end_frame is not None
+                and job.runtime.runtime_step not in (None, 0)
             ):
                 return (
-                    int(job.runtime_start_frame),
-                    int(job.runtime_end_frame),
-                    int(job.runtime_step),
+                    int(job.runtime.runtime_start_frame),
+                    int(job.runtime.runtime_end_frame),
+                    int(job.runtime.runtime_step),
                 )
         else:
-            info = self._probe_rop_info(job.hip_path, job.rop_path)
+            info = self._probe_rop_info(job.spec.hip_path, job.spec.rop_path)
             if info is None:
                 return None
             if info.error == "node_not_found":
@@ -2120,16 +2178,16 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         interactive: bool = True,
     ) -> tuple[int, int, int, int] | None:
-        sample_file_path = (job.out_file_sample_path or "").strip()
-        out_path = (job.out_path or "").strip()
+        sample_file_path = (job.view.out_file_sample_path or "").strip()
+        out_path = (job.view.out_path or "").strip()
         probe_path = sample_file_path or out_path
-        if job.strict_frame_range:
+        if job.spec.strict_frame_range:
             if interactive:
                 safe_message(self, "Resume From Output", "Cannot resume from output on a Strict frame range ROP.")
             return None
         resolved = self._resolve_job_range_for_execution(job, mutate_job=False)
         if resolved is None:
-            if job.status == JobStatus.OFFLINE:
+            if job.runtime.status == JobStatus.OFFLINE:
                 return None
             if interactive:
                 safe_message(self, "Resume From Output", "Cannot resolve frame range for this job.")
@@ -2148,8 +2206,8 @@ class MainWindow(QtWidgets.QMainWindow):
             or str(probe_path).lower() == "ip"
             or self._frame_sequence_path_for_frame(sample_file_path or probe_path, start_frame) is None
         )
-        if needs_pattern_refresh and Path(job.hip_path).exists() and self._hbatch_exists():
-            info = self._probe_rop_info(job.hip_path, job.rop_path)
+        if needs_pattern_refresh and Path(job.spec.hip_path).exists() and self._hbatch_exists():
+            info = self._probe_rop_info(job.spec.hip_path, job.spec.rop_path)
             if info is None:
                 info = None
             if info is not None and info.error == "node_not_found":
@@ -2165,7 +2223,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._normalize_output_display_path,
                     apply_runtime_range=False,
                 )
-            refreshed_sample = (job.out_file_sample_path or "").strip()
+            refreshed_sample = (job.view.out_file_sample_path or "").strip()
             if refreshed_sample:
                 probe_path = refreshed_sample
                 sample_file_path = refreshed_sample
@@ -2227,7 +2285,7 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> tuple[list[tuple[int, int, int]], int] | None:
         resolved = self._resolve_job_range_for_execution(job, mutate_job=False)
         if resolved is None:
-            if interactive and job.status != JobStatus.OFFLINE:
+            if interactive and job.runtime.status != JobStatus.OFFLINE:
                 safe_message(self, "Render Missing", "Cannot resolve frame range for this job.")
             return None
         start_frame, end_frame, step = resolved
@@ -2236,8 +2294,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 safe_message(self, "Render Missing", "Invalid job frame range.")
             return None
 
-        sample_file_path = (job.out_file_sample_path or "").strip()
-        out_path = (job.out_path or "").strip()
+        sample_file_path = (job.view.out_file_sample_path or "").strip()
+        out_path = (job.view.out_path or "").strip()
         probe_path = sample_file_path or out_path
         needs_pattern_refresh = (
             (not probe_path)
@@ -2245,8 +2303,8 @@ class MainWindow(QtWidgets.QMainWindow):
             or str(probe_path).lower() == "ip"
             or self._frame_sequence_path_for_frame(sample_file_path or probe_path, start_frame) is None
         )
-        if needs_pattern_refresh and Path(job.hip_path).exists() and self._hbatch_exists():
-            info = self._probe_rop_info(job.hip_path, job.rop_path)
+        if needs_pattern_refresh and Path(job.spec.hip_path).exists() and self._hbatch_exists():
+            info = self._probe_rop_info(job.spec.hip_path, job.spec.rop_path)
             if info is not None and info.error == "node_not_found":
                 self._mark_job_offline(job, "ROP node not found in HIP file.")
                 self._save_and_refresh_queue(select_job_id=job.id)
@@ -2258,7 +2316,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._normalize_output_display_path,
                     apply_runtime_range=False,
                 )
-            refreshed_sample = (job.out_file_sample_path or "").strip()
+            refreshed_sample = (job.view.out_file_sample_path or "").strip()
             if refreshed_sample:
                 probe_path = refreshed_sample
 
@@ -2312,9 +2370,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _resume_job_from_output(self, job: RenderJob) -> None:
         if self._render_job_active() or self.queue_active:
             return
-        if job.status not in {JobStatus.CANCELED, JobStatus.INTERRUPTED, JobStatus.QUEUED, JobStatus.DONE}:
+        if job.runtime.status not in {JobStatus.CANCELED, JobStatus.INTERRUPTED, JobStatus.QUEUED, JobStatus.DONE}:
             return
-        if not Path(job.hip_path).exists():
+        if not Path(job.spec.hip_path).exists():
             self._mark_job_offline(job, "HIP file not found.")
             self._save_queue_state()
             self._refresh_queue_table(select_job_id=job.id)
@@ -2322,17 +2380,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._hbatch_exists():
             safe_message(self, "hbatch Missing", "Configure a valid hbatch.exe path before resuming.")
             return
-        if not job.enabled:
+        if not job.spec.enabled:
             safe_message(self, "Resume From Output", "Job is disabled.")
             return
         resume_info = self._compute_resume_from_output(job)
         if resume_info is None:
             return
         resume_start, resume_end, resume_step, baseline_done = resume_info
-        job.resume_start_frame_runtime = int(resume_start)
-        job.resume_end_frame_runtime = int(resume_end)
-        job.resume_step_runtime = int(resume_step)
-        job.resume_completed_baseline_count = int(max(0, baseline_done))
+        job.runtime.resume_start_frame_runtime = int(resume_start)
+        job.runtime.resume_end_frame_runtime = int(resume_end)
+        job.runtime.resume_step_runtime = int(resume_step)
+        job.runtime.resume_completed_baseline_count = int(max(0, baseline_done))
         self._append_log(
             "Stdout",
             f"[Resume] {job.display_name()} from output: start={resume_start}, end={resume_end}, step={resume_step}, existing={baseline_done}\n",
@@ -2718,10 +2776,10 @@ class MainWindow(QtWidgets.QMainWindow):
         removed_entries = [
             {"index": idx, "job": self._job_to_persisted_dict(job)}
             for idx, job in enumerate(self.jobs)
-            if job.enabled is not False and job.status in {JobStatus.DONE, JobStatus.FAILED}
+            if job.spec.enabled is not False and job.runtime.status in {JobStatus.DONE, JobStatus.FAILED}
         ]
         self.jobs = [
-            job for job in self.jobs if job.enabled is False or job.status not in {JobStatus.DONE, JobStatus.FAILED}
+            job for job in self.jobs if job.spec.enabled is False or job.runtime.status not in {JobStatus.DONE, JobStatus.FAILED}
         ]
         if removed_entries:
             self._push_history_command(
@@ -2813,22 +2871,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def _populate_queue_row(self, row: int, job: RenderJob) -> None:
         values = [
             job.display_name(),
-            job.hip_path,
-            job.rop_path,
+            job.spec.hip_path,
+            job.spec.rop_path,
             job.frame_range_display(),
             job.step_display(),
             job.frame_handling_label(),
-            ("Disabled" if not job.enabled else job.status.value),
-            job.percent_text or "",
+            queue_row_status_label(job),
+            job.view.percent_text or "",
             self._job_phase_display(job),
             self._job_time_remaining_display(job),
             self._job_frame_display(job),
-            job.prev_frame_time_text or "-",
-            job.avg_frame_time_text or "-",
+            job.view.prev_frame_time_text or "-",
+            job.view.avg_frame_time_text or "-",
             self._job_started_time_display(job),
             self._job_end_time_display(job),
             self._job_total_time_display(job),
-            job.out_path or "",
+            job.view.out_path or "",
         ]
         for col, value in enumerate(values):
             item = self.queue_table.item(row, col)
@@ -2836,20 +2894,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 item = QtWidgets.QTableWidgetItem()
                 self.queue_table.setItem(row, col, item)
             item.setText(value)
-            item.setData(QtCore.Qt.ItemDataRole.UserRole + 20, str(job.status.value))
+            item.setData(QtCore.Qt.ItemDataRole.UserRole + 20, str(job.runtime.status.value))
             if col == 7:
                 build_pct, render_pct = self._queue_progress_split_values(job)
                 item.setData(QtCore.Qt.ItemDataRole.UserRole + 10, build_pct)
                 item.setData(QtCore.Qt.ItemDataRole.UserRole + 11, render_pct)
             flags = item.flags()
-            editable_allowed = False
-            if col in {0, 1, 2}:
-                editable_allowed = (not self._is_active_job(job))
-            elif col in {3, 4}:
-                editable_allowed = ((not self._is_active_job(job)) and not job.strict_frame_range)
-            elif col == 5:
-                editable_allowed = (not self._is_active_job(job))
-            if editable_allowed:
+            edit_decision = can_edit_job_column(
+                job,
+                column=col,
+                is_active_job=self._is_active_job(job),
+            )
+            if edit_decision.allowed:
                 item.setFlags(flags | QtCore.Qt.ItemFlag.ItemIsEditable)
             else:
                 item.setFlags(flags & ~QtCore.Qt.ItemFlag.ItemIsEditable)
@@ -2859,32 +2915,32 @@ class MainWindow(QtWidgets.QMainWindow):
             if col in {3, 4}:
                 range_is_overridden = False
                 step_is_overridden = False
-                if job.frame_range_mode == "override":
+                if job.spec.frame_range_mode == "override":
                     if (
-                        job.runtime_start_frame is None
-                        or job.runtime_end_frame is None
-                        or job.start_frame is None
-                        or job.end_frame is None
+                        job.runtime.runtime_start_frame is None
+                        or job.runtime.runtime_end_frame is None
+                        or job.spec.start_frame is None
+                        or job.spec.end_frame is None
                     ):
                         range_is_overridden = True
                     else:
                         try:
                             range_is_overridden = not (
-                                int(job.start_frame) == int(job.runtime_start_frame)
-                                and int(job.end_frame) == int(job.runtime_end_frame)
+                                int(job.spec.start_frame) == int(job.runtime.runtime_start_frame)
+                                and int(job.spec.end_frame) == int(job.runtime.runtime_end_frame)
                             )
                         except Exception:
                             range_is_overridden = True
 
-                    if job.runtime_step in (None, 0) or job.step is None:
+                    if job.runtime.runtime_step in (None, 0) or job.spec.step is None:
                         step_is_overridden = True
                     else:
                         try:
-                            step_is_overridden = int(job.step) != int(float(job.runtime_step))
+                            step_is_overridden = int(job.spec.step) != int(float(job.runtime.runtime_step))
                         except Exception:
                             step_is_overridden = True
 
-                if job.strict_frame_range:
+                if job.spec.strict_frame_range:
                     lock_path = str(getattr(self, "_theme_icons", {}).get("lock_orange", "") or "")
                     item.setIcon(QtGui.QIcon(lock_path) if lock_path else QtGui.QIcon())
                     item.setToolTip("ROP frame range is Strict (node-controlled).")
@@ -2894,16 +2950,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     item.setToolTip("Overridden value.")
                 else:
                     item.setIcon(QtGui.QIcon())
-                    if job.frame_range_mode == "use_rop":
+                    if job.spec.frame_range_mode == "use_rop":
                         item.setToolTip("Using ROP value.")
                     elif col == 3:
                         item.setToolTip("Range matches ROP value.")
                     else:
                         item.setToolTip("Step matches ROP value.")
             elif col == 0:
-                item.setToolTip(job.log_file_path or "")
+                item.setToolTip(job.runtime.log_file_path or "")
             elif col == 16:
-                item.setToolTip(job.out_path or "")
+                item.setToolTip(job.view.out_path or "")
         self._style_row(row, job)
 
     def _refresh_job_row(self, job_id: str) -> None:
@@ -2953,30 +3009,30 @@ class MainWindow(QtWidgets.QMainWindow):
         pal = self.queue_table.palette()
         base_color = pal.color(QtGui.QPalette.ColorRole.AlternateBase if row % 2 else QtGui.QPalette.ColorRole.Base)
         default_text_color = pal.color(QtGui.QPalette.ColorRole.Text)
-        if not job.enabled:
+        if not job.spec.enabled:
             color = QtGui.QColor("#161616")
             text_color = QtGui.QColor("#6f6f6f")
-        elif job.status == JobStatus.OFFLINE:
+        elif job.runtime.status == JobStatus.OFFLINE:
             color = QtGui.QColor("#2f2f2f")
             text_color = QtGui.QColor("#b0b0b0")
-        elif job.status == JobStatus.RUNNING:
+        elif job.runtime.status == JobStatus.RUNNING:
             color = QtGui.QColor(t["queue_running"])
             text_color = QtGui.QColor("#ffffff")
-        elif job.status == JobStatus.DONE:
+        elif job.runtime.status == JobStatus.DONE:
             color = QtGui.QColor(t["queue_done"])
             text_color = QtGui.QColor("#ffffff")
-        elif job.status == JobStatus.FAILED:
+        elif job.runtime.status == JobStatus.FAILED:
             color = QtGui.QColor(t["queue_failed"])
             text_color = QtGui.QColor("#ffffff")
-        elif job.status == JobStatus.INTERRUPTED:
+        elif job.runtime.status == JobStatus.INTERRUPTED:
             color = QtGui.QColor("#6b4e16")
             text_color = QtGui.QColor("#ffffff")
-        elif job.status == JobStatus.CANCELED:
+        elif job.runtime.status == JobStatus.CANCELED:
             color = None
         for col in range(self.queue_table.columnCount()):
             item = self.queue_table.item(row, col)
             if item is not None:
-                if job.status == JobStatus.OFFLINE:
+                if job.runtime.status == JobStatus.OFFLINE:
                     item.setBackground(QtGui.QBrush(QtGui.QColor("#2f2f2f")))
                 else:
                     item.setBackground(QtGui.QBrush(color if color else base_color))
@@ -2987,6 +3043,119 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.log_entries.append((source, text))
         self._append_to_log_view_if_matches(source, text)
+        self._append_notifications(source, text)
+
+    def _append_notifications(self, source: str, text: str) -> None:
+        if not hasattr(self, "notifications_list") or self.notifications_list is None:
+            return
+        source_label = str(source or "").strip() or "Info"
+        added = False
+        for message, severity in self._notification_messages_for_log(source_label, text):
+            item = QtWidgets.QListWidgetItem(message)
+            item.setIcon(self._notification_icon_for_severity(severity))
+            item.setForeground(QtGui.QBrush(self._notification_color_for_severity(severity)))
+            self.notifications_list.addItem(item)
+            added = True
+        if not added:
+            return
+        max_items = 250
+        while self.notifications_list.count() > max_items:
+            self.notifications_list.takeItem(0)
+        if self.notifications_list.count() > 0:
+            self.notifications_list.scrollToBottom()
+
+    def _notification_messages_for_log(self, source: str, text: str) -> list[tuple[str, str]]:
+        messages: list[tuple[str, str]] = []
+        for raw_line in str(text or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            summary = self._notification_summary_for_line(source, line)
+            if summary is not None:
+                messages.append(summary)
+        return messages
+
+    @staticmethod
+    def _notification_summary_for_line(source: str, line: str) -> tuple[str, str] | None:
+        low = line.lower()
+        if line.startswith("===") and line.endswith("==="):
+            inner = line.strip("=").strip()
+            inner_low = inner.lower()
+            if inner_low == "queue started":
+                return ("Queue started.", "info")
+            if inner_low == "queue complete":
+                return ("Queue complete.", "info")
+            if inner_low == "queue stopped":
+                return ("Queue stopped.", "warning")
+            if inner_low == "queue aborted":
+                return ("Queue aborted.", "error")
+            if inner_low.startswith("render start:"):
+                job_name = inner.split(":", 1)[1].strip() if ":" in inner else inner
+                return (f"Started render: {job_name}", "info")
+            return None
+        if line.startswith("[Recovery] "):
+            return (line[len("[Recovery] ") :].strip(), "warning")
+        if line.startswith("[Queue] Stop requested"):
+            return ("Stopping queue after the current step.", "warning")
+        if line.startswith("[Queue] Terminating current render process"):
+            return ("Stopping the active render.", "warning")
+        if line.startswith("[Queue] Force killing current render process"):
+            return ("Force-stopped the active render.", "error")
+        if line.startswith("[Queue] Resumed"):
+            return ("Queue resumed.", "info")
+        if line.startswith("[Queue] Pause requested"):
+            return ("Queue will pause after the current job.", "warning")
+        if line.startswith("[Scan] No likely render/output nodes matched"):
+            return ("No likely render nodes were found. Showing all scanned nodes.", "warning")
+        if line.startswith("[Retry] "):
+            return ("Retrying the current render chunk after a worker failure.", "warning")
+        if line.startswith("[Preflight] Failed"):
+            return ("Render preflight failed.", "error")
+        if line.startswith("[Queue] Failed to save queue"):
+            return ("Failed to save the queue file.", "error")
+        if line.startswith("[Queue] Failed to load queue"):
+            return ("Failed to load the queue file.", "error")
+        if line.startswith("[Queue] Failed to start render worker"):
+            return ("Failed to start the render worker.", "error")
+        if line.startswith("[Log] Failed to open log file"):
+            return ("Failed to open the job log file.", "error")
+        if "unresponsive" in low and "worker" in low:
+            if "render worker" in low:
+                return ("The render worker stopped responding.", "error")
+            if "scan worker" in low:
+                return ("The scan worker stopped responding.", "error")
+            return ("A worker process stopped responding.", "error")
+        if "worker exited unexpectedly" in low:
+            if "render worker" in low:
+                return ("The render worker exited unexpectedly.", "error")
+            if "scan worker" in low:
+                return ("The scan worker exited unexpectedly.", "error")
+            return ("A worker process exited unexpectedly.", "error")
+        if source.lower() == "stderr" and any(token in low for token in ("traceback", "error", "failed", "interrupted")):
+            if "interrupted" in low:
+                return ("A render was interrupted.", "warning")
+            if "traceback" in low:
+                return ("A technical error was reported. See Logs for details.", "error")
+            return ("An error was reported. See Logs for details.", "error")
+        return None
+
+    def _notification_icon_for_severity(self, severity: str) -> QtGui.QIcon:
+        style = self.style()
+        sev = str(severity or "info").lower()
+        if sev == "error":
+            return style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxCritical)
+        if sev == "warning":
+            return style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning)
+        return style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation)
+
+    @staticmethod
+    def _notification_color_for_severity(severity: str) -> QtGui.QColor:
+        sev = str(severity or "info").lower()
+        if sev == "error":
+            return QtGui.QColor("#d96b6b")
+        if sev == "warning":
+            return QtGui.QColor("#d4ad4a")
+        return QtGui.QColor("#d8d8d8")
 
     def _append_to_log_view_if_matches(self, source: str, text: str) -> None:
         source_filter = self.log_source_filter.currentText()
@@ -3010,6 +3179,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_entries.clear()
         self.log_output.clear()
 
+    def _clear_notifications_view_only(self) -> None:
+        if hasattr(self, "notifications_list") and self.notifications_list is not None:
+            self.notifications_list.clear()
+
     def _on_queue_selection_changed(self) -> None:
         self.queue_table.viewport().update()
         self._refresh_ui_state()
@@ -3025,35 +3198,35 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
 
     def _queue_progress_split_values(self, job: RenderJob) -> tuple[int | None, int | None]:
-        pct = self._parse_percent_value(job.percent_text)
+        pct = self._parse_percent_value(job.view.percent_text)
         build_pct: int | None = None
         render_pct: int | None = None
-        show_usd_build = (job.allframesatonce_enabled is True)
+        show_usd_build = (job.runtime.allframesatonce_enabled is True)
 
-        if job.status == JobStatus.DONE:
+        if job.runtime.status == JobStatus.DONE:
             render_pct = 100
-            if show_usd_build and job.usd_build_percent is not None:
-                build_pct = job.usd_build_percent
+            if show_usd_build and job.view.usd_build_percent is not None:
+                build_pct = job.view.usd_build_percent
             else:
                 build_pct = 100 if show_usd_build else None
             return build_pct, render_pct
 
-        if show_usd_build and job.phase_text == "USD Build":
-            build_pct = job.usd_build_percent if job.usd_build_percent is not None else pct
+        if show_usd_build and job.view.phase_text == "USD Build":
+            build_pct = job.view.usd_build_percent if job.view.usd_build_percent is not None else pct
             render_pct = 0
             return build_pct, render_pct
-        if job.phase_text == "Render":
+        if job.view.phase_text == "Render":
             render_pct = pct
-            if show_usd_build and job.usd_build_percent is not None:
-                build_pct = job.usd_build_percent
+            if show_usd_build and job.view.usd_build_percent is not None:
+                build_pct = job.view.usd_build_percent
             else:
-                build_pct = 100 if show_usd_build and job.build_pass_completed else None
+                build_pct = 100 if show_usd_build and job.view.build_pass_completed else None
             return build_pct, render_pct
 
         if pct is not None:
             render_pct = pct
-        if show_usd_build and job.usd_build_percent is not None:
-            build_pct = job.usd_build_percent
+        if show_usd_build and job.view.usd_build_percent is not None:
+            build_pct = job.view.usd_build_percent
         return build_pct, render_pct
 
     def _queue_header_visual_order(self) -> list[int]:
@@ -3279,8 +3452,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 safe_message(self, "Invalid Path", str(exc))
                 self._refresh_queue_preserve_selection()
                 return
-            old_hip = str(job.hip_path or "").strip()
-            old_rop = str(job.rop_path or "").strip()
+            old_hip = str(job.spec.hip_path or "").strip()
+            old_rop = str(job.spec.rop_path or "").strip()
             if col == 1:
                 changed_ids = self._propagate_hip_path_change(old_hip, source_text)
             else:
@@ -3359,8 +3532,8 @@ class MainWindow(QtWidgets.QMainWindow):
             target = self.jobs[target_row]
             if self._is_active_job(target):
                 continue
-            if target.frame_handling_mode != new_mode:
-                target.frame_handling_mode = new_mode
+            if target.spec.frame_handling_mode != new_mode:
+                target.spec.frame_handling_mode = new_mode
                 changed = True
         if changed:
             after_states = self._job_states_for_ids(target_job_ids)
@@ -3428,12 +3601,12 @@ class MainWindow(QtWidgets.QMainWindow):
         }
         changed = False
         for job in self.jobs:
-            if os.path.normcase(job.hip_path) != hip_path_norm:
+            if os.path.normcase(job.spec.hip_path) != hip_path_norm:
                 continue
-            rec = rec_map.get(job.rop_path)
+            rec = rec_map.get(job.spec.rop_path)
             if rec is None:
                 continue
-            before = (job.strict_frame_range, job.out_path, job.out_file_sample_path)
+            before = (job.spec.strict_frame_range, job.view.out_path, job.view.out_file_sample_path)
             info = rop_info_from_scan_record_model(rec)
             apply_rop_info_to_job_model(
                 job,
@@ -3441,7 +3614,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._normalize_output_display_path,
                 apply_runtime_range=True,
             )
-            after = (job.strict_frame_range, job.out_path, job.out_file_sample_path)
+            after = (job.spec.strict_frame_range, job.view.out_path, job.view.out_file_sample_path)
             if before != after:
                 changed = True
         if changed:
@@ -3491,8 +3664,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_status_message("Queue started")
         self._refresh_ui_state()
         if can_start_selected:
-            if selected is not None and selected.status not in {JobStatus.RUNNING, JobStatus.QUEUED}:
-                self._queue_rerun_statuses = {selected.status}
+            if selected is not None and selected.runtime.status not in {JobStatus.RUNNING, JobStatus.QUEUED}:
+                self._queue_rerun_statuses = {selected.runtime.status}
             self._start_job(selected)
         else:
             self._maybe_start_next_job()
@@ -3560,7 +3733,7 @@ class MainWindow(QtWidgets.QMainWindow):
             safe_message(self, "hbatch Missing", "Configured hbatch.exe no longer exists.")
             self._finish_queue("Queue aborted")
             return
-        if not Path(job.hip_path).exists():
+        if not Path(job.spec.hip_path).exists():
             self._mark_job_offline(job, "HIP file not found.")
             self._save_queue_state()
             self._refresh_queue_table(select_job_id=job.id)
@@ -3589,24 +3762,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Build runtime chunk plan after frame-handling planning.
         self._initialize_job_chunk_runtime(job, forced_ranges=forced_ranges)
-        if not job.chunk_ranges_runtime and self._chunking_enabled():
+        if not job.runtime.chunk_ranges_runtime and self._chunking_enabled():
             # Fall back to non-chunked execution if range resolution failed.
-            job.chunk_retry_count_runtime = self._retry_count_value()
+            job.runtime.chunk_retry_count_runtime = self._retry_count_value()
 
         resume_baseline = int(max(0, baseline_done))
 
-        job.status = JobStatus.RUNNING
-        job.started_at = datetime.now()
-        job.finished_at = None
-        job.exit_code = None
-        job.error_summary = ""
-        job.offline_detected_reason = ""
+        job.runtime.status = JobStatus.RUNNING
+        job.runtime.started_at = datetime.now()
+        job.runtime.finished_at = None
+        job.runtime.exit_code = None
+        job.runtime.error_summary = ""
+        job.runtime.offline_detected_reason = ""
         self._reset_job_process_attempt_state(job)
-        job.runtime_start_frame = None
-        job.runtime_end_frame = None
-        job.runtime_step = None
+        job.runtime.runtime_start_frame = None
+        job.runtime.runtime_end_frame = None
+        job.runtime.runtime_step = None
         # Keep the last known output path visible until a newer one is detected.
-        job.resume_completed_baseline_count = resume_baseline
+        job.runtime.resume_completed_baseline_count = resume_baseline
         self._cancel_phase_promote()
         self.current_job_id = job.id
         self.canceling_current_job = False
@@ -3617,34 +3790,34 @@ class MainWindow(QtWidgets.QMainWindow):
             self._queue_next_search_index = 0
 
         try:
-            Path(job.log_file_path).parent.mkdir(parents=True, exist_ok=True)
-            self.current_job_log_handle = open(job.log_file_path, "a", encoding="utf-8", errors="replace")
+            Path(job.runtime.log_file_path).parent.mkdir(parents=True, exist_ok=True)
+            self.current_job_log_handle = open(job.runtime.log_file_path, "a", encoding="utf-8", errors="replace")
         except Exception as exc:
             self.current_job_log_handle = None
             self._append_log("Stderr", f"[Log] Failed to open log file: {exc}\n")
 
         self._write_job_log(f"=== Job Started: {job.display_name()} ===\n")
-        self._write_job_log(f"HIP: {job.hip_path}\nROP: {job.rop_path}\nFrames: {job.frame_display()}\n")
-        if job.chunk_total_runtime > 1:
+        self._write_job_log(f"HIP: {job.spec.hip_path}\nROP: {job.spec.rop_path}\nFrames: {job.frame_display()}\n")
+        if job.runtime.chunk_total_runtime > 1:
             self._write_job_log(
-                f"[Chunking] {job.chunk_total_runtime} chunks | retries={job.chunk_retry_count_runtime} | delay={self._retry_delay_value()}s\n"
+                f"[Chunking] {job.runtime.chunk_total_runtime} chunks | retries={job.runtime.chunk_retry_count_runtime} | delay={self._retry_delay_value()}s\n"
             )
         if resume_baseline > 0:
             self._write_job_log(f"[Frame Handling] Existing frames baseline: {resume_baseline}\n")
 
         self._append_log("Stdout", f"\n=== Render Start: {job.display_name()} ===\n")
-        if job.chunk_total_runtime > 1:
+        if job.runtime.chunk_total_runtime > 1:
             self._append_log(
                 "Stdout",
-                f"[Chunk] {job.chunk_index_runtime + 1}/{job.chunk_total_runtime} | frames {job.chunk_start_frame_runtime}-{job.chunk_end_frame_runtime} | attempt {job.chunk_attempt_runtime}/{1 + max(0, job.chunk_retry_count_runtime)}\n",
+                f"[Chunk] {job.runtime.chunk_index_runtime + 1}/{job.runtime.chunk_total_runtime} | frames {job.runtime.chunk_start_frame_runtime}-{job.runtime.chunk_end_frame_runtime} | attempt {job.runtime.chunk_attempt_runtime}/{1 + max(0, job.runtime.chunk_retry_count_runtime)}\n",
             )
         payload = self.render_session.build_render_worker_payload(job)
         if payload is None or not self._start_render_worker_payload(payload):
             self._append_log("Stderr", "[Queue] Failed to start render worker.\n")
-            job.status = JobStatus.FAILED
-            job.exit_code = -1
-            job.finished_at = datetime.now()
-            job.error_summary = "Failed to start render worker."
+            job.runtime.status = JobStatus.FAILED
+            job.runtime.exit_code = -1
+            job.runtime.finished_at = datetime.now()
+            job.runtime.error_summary = "Failed to start render worker."
             self._close_current_job_log()
             self.current_job_id = None
             self._refresh_queue_table(select_job_id=job.id)
@@ -3684,6 +3857,10 @@ class MainWindow(QtWidgets.QMainWindow):
         message_type = str(message.get("type", "") or "")
         if message_type == "render.started":
             self._render_finished_message_received = False
+            try:
+                self._active_hbatch_pid = int(payload.get("pid", 0) or 0)
+            except Exception:
+                self._active_hbatch_pid = 0
             return
         if message_type == "render.output":
             text = str(payload.get("text", "") or "")
@@ -3714,6 +3891,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _handle_render_worker_crash(self, reason: str) -> None:
         if self._pending_kill_timer is not None:
             self._pending_kill_timer.stop()
+        self._kill_active_hbatch_tree()
         job = self._current_job()
         if job is None:
             return
@@ -3725,6 +3903,21 @@ class MainWindow(QtWidgets.QMainWindow):
             retry_delay_value=self._retry_delay_value(),
         )
         if crash_result.terminal_finish:
+            if not self.canceling_current_job and not self.stop_requested:
+                self.render_session.finalize_worker_crash(job, reason)
+                finished_job_id = job.id
+                try:
+                    self._queue_next_search_index = self.jobs.index(job) + 1
+                except ValueError:
+                    self._queue_next_search_index = 0
+                self.current_job_id = None
+                self._active_hbatch_pid = 0
+                self.canceling_current_job = False
+                self._close_current_job_log()
+                self._save_queue_state()
+                self._refresh_queue_table(select_job_id=finished_job_id)
+                self._maybe_start_next_job()
+                return
             self._on_render_finished(-1, QtCore.QProcess.ExitStatus.CrashExit)
             return
         if crash_result.retry_scheduled:
@@ -3750,60 +3943,60 @@ class MainWindow(QtWidgets.QMainWindow):
         update_job_render_timing_stats_model(job, format_duration_short_fn=format_duration_short)
 
     def _update_phase_from_frame_sequence(self, job: RenderJob, previous_frame_seen: float | None) -> None:
-        if job.allframesatonce_enabled is not True:
+        if job.runtime.allframesatonce_enabled is not True:
             return
-        if job.last_frame_seen is None:
+        if job.view.last_frame_seen is None:
             return
-        if job.phase_text == "Render":
+        if job.view.phase_text == "Render":
             self._cancel_phase_promote()
             return
 
-        current = job.last_frame_seen
+        current = job.view.last_frame_seen
         range_start: float | None = None
         range_end: float | None = None
         range_step: float = 1.0
 
-        if job.frame_range_mode == "override" and job.start_frame is not None and job.end_frame is not None:
-            range_start = float(job.start_frame)
-            range_end = float(job.end_frame)
-            range_step = float(job.step or 1)
-        elif job.runtime_start_frame is not None and job.runtime_end_frame is not None:
-            range_start = float(job.runtime_start_frame)
-            range_end = float(job.runtime_end_frame)
-            range_step = float(job.runtime_step or 1.0)
+        if job.spec.frame_range_mode == "override" and job.spec.start_frame is not None and job.spec.end_frame is not None:
+            range_start = float(job.spec.start_frame)
+            range_end = float(job.spec.end_frame)
+            range_step = float(job.spec.step or 1)
+        elif job.runtime.runtime_start_frame is not None and job.runtime.runtime_end_frame is not None:
+            range_start = float(job.runtime.runtime_start_frame)
+            range_end = float(job.runtime.runtime_end_frame)
+            range_step = float(job.runtime.runtime_step or 1.0)
 
         if range_start is not None and range_end is not None:
             # Mark first pass (USD build) complete once the frame sequence reaches the end.
             if current >= range_end:
-                if not job.build_pass_completed:
-                    job.build_pass_completed = True
+                if not job.view.build_pass_completed:
+                    job.view.build_pass_completed = True
                     self._schedule_phase_promote(job.id)
             # If frames restart after the build pass, render phase has definitely started.
             if (
-                job.build_pass_completed
+                job.view.build_pass_completed
                 and previous_frame_seen is not None
                 and current < previous_frame_seen
                 and current <= float(range_start + (range_step * 2))
             ):
-                job.phase_text = "Render"
+                job.view.phase_text = "Render"
                 self._cancel_phase_promote()
                 return
         else:
             # Fallback heuristic without a known range: restart implies next pass.
-            if job.phase_text == "USD Build" and previous_frame_seen is not None and current < previous_frame_seen:
-                job.phase_text = "Render"
+            if job.view.phase_text == "USD Build" and previous_frame_seen is not None and current < previous_frame_seen:
+                job.view.phase_text = "Render"
                 self._cancel_phase_promote()
 
     def _update_job_phase_from_output(self, job: RenderJob, text: str) -> None:
         phase = detect_phase_from_output_with_job_model(job, text)
         if not phase:
             return
-        if phase == "USD Build" and job.allframesatonce_enabled is False:
+        if phase == "USD Build" and job.runtime.allframesatonce_enabled is False:
             return
         # Once actual rendering starts, keep that phase unless the job restarts.
-        if job.phase_text == "Render" and phase != "Render":
+        if job.view.phase_text == "Render" and phase != "Render":
             return
-        job.phase_text = phase
+        job.view.phase_text = phase
 
     def _schedule_phase_promote(self, job_id: str) -> None:
         if self._phase_promote_timer is None:
@@ -3826,13 +4019,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self._render_job_active():
             return
-        if job.allframesatonce_enabled is True and job.build_pass_completed and job.phase_text != "Render":
-            job.phase_text = "Render"
+        if job.runtime.allframesatonce_enabled is True and job.view.build_pass_completed and job.view.phase_text != "Render":
+            job.view.phase_text = "Render"
             self._refresh_job_row(job.id)
 
     def _on_render_finished(self, exit_code: int, exit_status: QtCore.QProcess.ExitStatus) -> None:
         if self._pending_kill_timer is not None:
             self._pending_kill_timer.stop()
+        self._active_hbatch_pid = 0
         job = self._current_job()
         if job is None:
             return
@@ -3887,6 +4081,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.queue_paused = False
         self.stop_requested = False
         self.current_job_id = None
+        self._active_hbatch_pid = 0
         self.canceling_current_job = False
         self._queue_rerun_statuses = set()
         self._jobs_started_this_run = set()
@@ -3894,6 +4089,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_status_message(message, 5000)
         self._append_log("Stdout", f"\n=== {message} ===\n")
         self._refresh_queue_table()
+
+    def _kill_process_tree_by_pid(self, pid: int) -> bool:
+        if pid <= 0 or not sys.platform.startswith("win"):
+            return False
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            return False
+        output = f"{result.stdout}\n{result.stderr}".lower()
+        return result.returncode == 0 or "not found" in output or "no running instance" in output
+
+    def _kill_active_hbatch_tree(self) -> bool:
+        pid = int(self._active_hbatch_pid or 0)
+        if pid <= 0:
+            return False
+        killed = self._kill_process_tree_by_pid(pid)
+        if killed:
+            self._active_hbatch_pid = 0
+        return killed
 
     def _write_job_log(self, text: str) -> None:
         try:
@@ -3913,16 +4134,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _open_selected_job_log(self) -> None:
         job = self._selected_job()
-        if not job or not job.log_file_path:
+        if not job or not job.runtime.log_file_path:
             return
-        path = Path(job.log_file_path)
+        path = Path(job.runtime.log_file_path)
         if not path.exists():
             safe_message(self, "Log Missing", f"Log file does not exist:\n{path}")
             return
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
 
     def _job_preview_path(self, job: RenderJob) -> Path | None:
-        candidate = str(job.out_file_sample_path or "").strip()
+        candidate = str(job.view.out_file_sample_path or "").strip()
         if not candidate or candidate.lower() == "ip":
             return None
 
@@ -4021,7 +4242,7 @@ class MainWindow(QtWidgets.QMainWindow):
         job = self._selected_job()
         if not job:
             return
-        folder = self._output_folder_from_value(job.out_path) or Path(job.hip_path).parent
+        folder = self._output_folder_from_value(job.view.out_path) or Path(job.spec.hip_path).parent
         if not folder.exists():
             safe_message(self, "Folder Missing", f"Folder does not exist:\n{folder}")
             return
@@ -4076,6 +4297,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             self.stop_requested = True
             self.canceling_current_job = True
+            self._kill_active_hbatch_tree()
             self._send_render_worker_request("render.kill", {}, request_id=self._active_render_request_id or uuid4().hex)
 
         self.scan_worker_client.shutdown()
@@ -4087,6 +4309,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.config.set("main_splitter_left_width", int(self._main_splitter_left_width_pref))
         if self._left_splitter_top_height_pref is not None:
             self.config.set("left_splitter_top_height", int(self._left_splitter_top_height_pref))
+        if self._left_notifications_height_pref is not None:
+            self.config.set("left_notifications_height", int(self._left_notifications_height_pref))
         self.config.set("hbatch_path", self._current_hbatch_path())
         super().closeEvent(event)
 
@@ -4094,6 +4318,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().resizeEvent(event)
         self._apply_main_splitter_left_width_pref()
         self._apply_left_splitter_default_sizes()
+        self._apply_left_column_splitter_default_sizes()
 
 
 def install_excepthook() -> None:

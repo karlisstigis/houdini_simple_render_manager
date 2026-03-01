@@ -120,7 +120,7 @@ class RenderSessionController:
         commands.extend([plan.command_text, "quit"])
         return {
             "job_id": job.id,
-            "hip_path": job.hip_path,
+            "hip_path": job.spec.hip_path,
             "hbatch_path": self._hooks.current_hbatch_path(),
             "commands": commands,
             "effective_plan": {
@@ -279,6 +279,25 @@ class RenderSessionController:
             self._hooks.refresh_queue_table(select_job_id=job.id)
             return RenderCrashResult(retry_scheduled=True, terminal_finish=False, delay_ms=delay_sec * 1000)
         return RenderCrashResult(retry_scheduled=False, terminal_finish=True)
+
+    def finalize_worker_crash(self, job: RenderJob, reason: str) -> None:
+        clean_reason = str(reason or "Render worker crashed unexpectedly.").strip()
+        if job.runtime.chunk_total_runtime > 0:
+            chunk_label = (
+                f" Last active: chunk {max(1, job.runtime.chunk_index_runtime + 1)}/"
+                f"{max(1, job.runtime.chunk_total_runtime)}."
+            )
+            if chunk_label.strip() not in clean_reason:
+                clean_reason = f"{clean_reason}{chunk_label}"
+        job.runtime.status = JobStatus.INTERRUPTED
+        job.runtime.finished_at = self._hooks.current_time()
+        job.runtime.exit_code = -1
+        job.runtime.interrupted_reason = clean_reason
+        job.runtime.error_summary = clean_reason
+        if not job.view.progress_text or job.view.progress_text == "-":
+            job.view.progress_text = "Interrupted"
+        job.view.percent_text = "-"
+        self._hooks.write_job_log(f"\n=== Job Interrupted: worker crash ===\n{clean_reason}\n")
 
     def handle_render_finished(
         self,

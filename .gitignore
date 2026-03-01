@@ -1,9 +1,12 @@
 .venv/
 __pycache__/
+.vscode/
+.codex/
+.tmp_test/
 *.py[cod]
 *$py.class
 .env
-.vscode/
+
 
 desktop.ini
 

@@ -77,32 +77,45 @@ class RenderSessionTests(unittest.TestCase):
                 step=1,
             )
             controller.handle_worker_output(job, "frame 1004\n>>> Render E:/renders/img.1004.exr, driver\n")
-            self.assertEqual(job.progress_text, "1004")
-            self.assertTrue(job.percent_text.startswith("40%"))
-            self.assertEqual(job.out_file_sample_path, "E:/renders/img.1004.exr")
+            self.assertEqual(job.view.progress_text, "1004")
+            self.assertTrue(job.view.percent_text.startswith("40%"))
+            self.assertEqual(job.view.out_file_sample_path, "E:/renders/img.1004.exr")
 
     def test_handle_render_finished_can_continue_to_next_chunk(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             started_payloads: list[dict] = []
             controller = self._make_controller(tmpdir, started_payloads)
             job = RenderJob(hip_path="E:/shot/test.hip", rop_path="/out/mantra1", frame_range_mode="use_rop")
-            job.chunk_ranges_runtime = [(1001, 1002, 1), (1003, 1004, 1)]
-            job.chunk_total_runtime = 2
-            job.chunk_index_runtime = 0
-            job.chunk_attempt_runtime = 1
-            job.chunk_start_frame_runtime = 1001
-            job.chunk_end_frame_runtime = 1002
-            job.chunk_step_runtime = 1
+            job.runtime.chunk_ranges_runtime = [(1001, 1002, 1), (1003, 1004, 1)]
+            job.runtime.chunk_total_runtime = 2
+            job.runtime.chunk_index_runtime = 0
+            job.runtime.chunk_attempt_runtime = 1
+            job.runtime.chunk_start_frame_runtime = 1001
+            job.runtime.chunk_end_frame_runtime = 1002
+            job.runtime.chunk_step_runtime = 1
 
             result = controller.handle_render_finished(
                 job,
                 0,
                 QtCore.QProcess.ExitStatus.NormalExit,
                 was_canceled=False,
-                advance_job_to_next_chunk=lambda target: setattr(target, "chunk_index_runtime", 1) or setattr(target, "chunk_start_frame_runtime", 1003) or setattr(target, "chunk_end_frame_runtime", 1004) or True,
+                advance_job_to_next_chunk=lambda target: setattr(target.runtime, "chunk_index_runtime", 1) or setattr(target.runtime, "chunk_start_frame_runtime", 1003) or setattr(target.runtime, "chunk_end_frame_runtime", 1004) or True,
                 retry_delay_value=0,
             )
             self.assertTrue(result.continue_next_chunk)
+
+    def test_finalize_worker_crash_marks_job_interrupted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            started_payloads: list[dict] = []
+            controller = self._make_controller(tmpdir, started_payloads)
+            job = RenderJob(hip_path="E:/shot/test.hip", rop_path="/out/mantra1", frame_range_mode="use_rop")
+            job.runtime.chunk_total_runtime = 3
+            job.runtime.chunk_index_runtime = 1
+            controller.finalize_worker_crash(job, "Worker died")
+            self.assertEqual(job.runtime.status.value, "Interrupted")
+            self.assertEqual(job.runtime.exit_code, -1)
+            self.assertIn("worker died", job.runtime.interrupted_reason.lower())
+            self.assertIn("chunk 2/3", job.runtime.interrupted_reason.lower())
 
 
 if __name__ == "__main__":

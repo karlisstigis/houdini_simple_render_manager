@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 
 from PySide6 import QtCore
 
@@ -16,14 +17,26 @@ class RenderWorker(QtCore.QObject):
         self._active_request_id = ""
         self._active_job_id = ""
         self._graceful_stop_requested = False
+        self._emit_lock = threading.Lock()
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, name="render-worker-heartbeat", daemon=True)
         self._stdin_reader = StdinReader(self)
         self._stdin_reader.chunk_read.connect(self._consume_stdin_chunk)
         self._stdin_reader.closed.connect(self._handle_stdin_closed)
         self._stdin_reader.start()
+        self._heartbeat_thread.start()
 
     def _emit(self, message_type: str, request_id: str, payload: dict | None = None) -> None:
-        sys.stdout.buffer.write(encode_message(message_type, request_id, payload or {}))
-        sys.stdout.buffer.flush()
+        with self._emit_lock:
+            sys.stdout.buffer.write(encode_message(message_type, request_id, payload or {}))
+            sys.stdout.buffer.flush()
+
+    def _heartbeat_loop(self) -> None:
+        while not self._heartbeat_stop.wait(2.0):
+            request_id = str(self._active_request_id or "")
+            if not request_id:
+                continue
+            self._emit("worker.heartbeat", request_id, {"busy": True, "job_id": self._active_job_id})
 
     def _consume_stdin_chunk(self, chunk: bytes) -> None:
         for message in self._buffer.push_bytes(chunk):
@@ -31,6 +44,7 @@ class RenderWorker(QtCore.QObject):
 
     def _handle_stdin_closed(self) -> None:
         self._shutdown()
+        self._heartbeat_stop.set()
         QtCore.QCoreApplication.quit()
 
     def _handle_message(self, message: dict) -> None:
