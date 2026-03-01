@@ -269,6 +269,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(self._build_app_icon())
         self.resize(1280, 820)
         self.setAcceptDrops(True)
 
@@ -838,6 +839,31 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             painter.end()
         return QtGui.QIcon(pix)
+
+    @staticmethod
+    def _build_app_icon() -> QtGui.QIcon:
+        icon = QtGui.QIcon()
+        for size in (16, 24, 32, 48, 64, 128, 256):
+            pix = QtGui.QPixmap(size, size)
+            pix.fill(QtGui.QColor("#000000"))
+            painter = QtGui.QPainter(pix)
+            try:
+                painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, False)
+                pen = QtGui.QPen(QtGui.QColor("#ffffff"))
+                pen.setWidth(max(2, size // 12))
+                painter.setPen(pen)
+                left = max(3, size // 5)
+                right = size - left
+                y1 = max(4, int(size * 0.28))
+                y2 = int(size * 0.50)
+                y3 = min(size - 4, int(size * 0.72))
+                painter.drawLine(left, y1, right, y1)
+                painter.drawLine(left, y2, right, y2)
+                painter.drawLine(left, y3, right, y3)
+            finally:
+                painter.end()
+            icon.addPixmap(pix)
+        return icon
 
     def _set_status_message(self, text: str, timeout_ms: int | None = None) -> None:
         if hasattr(self, "status_label") and self.status_label is not None:
@@ -4526,7 +4552,7 @@ class MainWindow(QtWidgets.QMainWindow):
             player_path_set=bool(player_path),
             player_exists=bool(player_path and player.exists()),
         )
-        if not preview_decision.allowed:
+        if not preview_decision.valid:
             if preview_decision.message == "Preview player does not exist." and player_path:
                 safe_message(self, "Preview", f"Preview player does not exist:\n{player}")
             else:
@@ -4707,6 +4733,7 @@ def create_app() -> QtWidgets.QApplication:
     QtCore.QCoreApplication.setApplicationName(APP_NAME)
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setWindowIcon(MainWindow._build_app_icon())
     return app
 
 
