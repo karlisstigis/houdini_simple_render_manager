@@ -16,11 +16,16 @@ from action_policy import (
     can_edit_job,
     can_edit_job_column,
     can_open_queue_file,
+    can_open_output_folder,
+    can_preview_job,
+    can_reload_jobs_from_file,
     can_remove_jobs,
+    can_resume_job_from_output,
     is_job_runnable,
-    queue_row_status_label,
+    can_start_queue,
 )
 from atomic_io import read_json_file, write_json_atomic
+from diagnostics import DiagnosticsSnapshot, build_diagnostics_report
 from houdini_service import (
     build_render_preflight_script as build_render_preflight_script_model,
     ensure_husk_hook_files as ensure_husk_hook_files_model,
@@ -28,6 +33,17 @@ from houdini_service import (
     project_houdini_scripts_dir as project_houdini_scripts_dir_model,
     required_houdini_script_filenames as required_houdini_script_filenames_model,
     validate_houdini_script_files as validate_houdini_script_files_model,
+)
+from job_validation import (
+    validate_log_file_deletion,
+    validate_logs_folder_access,
+    validate_output_folder_open,
+    validate_preview_launch,
+    validate_render_missing_inputs,
+    validate_render_missing_probe_path,
+    validate_resolved_frame_range_for_resume,
+    validate_resume_from_output_inputs,
+    validate_resume_probe_path,
 )
 from queue_editing import (
     apply_queue_frame_override_text,
@@ -58,6 +74,7 @@ from queue_execution import (
     retry_current_chunk as retry_current_chunk_model,
     select_next_runnable_job,
 )
+from queue_filter_proxy import QueueFilterProxyModel, QUEUE_STATUS_FILTER_OPTIONS
 from queue_runtime_state import (
     initialize_job_chunk_runtime as initialize_job_chunk_runtime_model,
     job_end_time_display as job_end_time_display_model,
@@ -69,6 +86,7 @@ from queue_runtime_state import (
     total_frames_for_job as total_frames_for_job_model,
     update_job_render_timing_stats as update_job_render_timing_stats_model,
 )
+from queue_table_model import QueueTableModel, QueueTableModelHooks
 from queue_tree_ui import (
     TREE_HIP_ROLE,
     TREE_KIND_ROLE,
@@ -77,12 +95,16 @@ from queue_tree_ui import (
     refresh_queue_tree_model,
 )
 from queue_tree_sync import (
+    apply_hip_path_change as apply_hip_path_change_model,
+    apply_rop_path_change as apply_rop_path_change_model,
     propagate_hip_path_change as propagate_hip_path_change_model,
     propagate_rop_path_change as propagate_rop_path_change_model,
     refresh_jobs_from_rop_metadata as refresh_jobs_from_rop_metadata_model,
+    sync_jobs_after_path_change as sync_jobs_after_path_change_model,
     validate_queue_path_value as validate_queue_path_value_model,
 )
 from render_session import RenderSessionController, RenderSessionHooks
+from recovery_reporting import build_startup_recovery_summary
 from scan_coordinator import ScanCoordinator, ScanCoordinatorHooks
 from render_output_parser import (
     detect_phase_from_output_with_job as detect_phase_from_output_with_job_model,
@@ -271,16 +293,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_entries: list[tuple[str, str]] = []
         self._active_render_request_id = ""
         self._active_scan_request_id = ""
+        self._create_job_scan_in_progress = False
         self._render_finished_message_received = False
         self._active_hbatch_pid = 0
         self._pending_queue_refresh_args: dict[str, Any] | None = None
         self._pending_queue_refresh_timer = QtCore.QTimer(self)
         self._pending_queue_refresh_timer.setSingleShot(True)
         self._pending_queue_refresh_timer.timeout.connect(self._flush_pending_queue_refresh)
+        self._path_sync_overlay_progress = 0.0
+        self._path_sync_overlay_timer = QtCore.QTimer(self)
+        self._path_sync_overlay_timer.setInterval(40)
+        self._path_sync_overlay_timer.timeout.connect(self._advance_path_sync_overlay)
         self._houdini_scripts_missing_warned = False
-        self._suppress_queue_item_changed = False
         self._queue_header_group_restore_guard = False
         self._queue_header_valid_order: list[int] = []
+        self._interaction_block_depth = 0
+        self._path_sync_lock_counts: dict[str, int] = {}
+        self._pending_path_sync_tasks: list[dict[str, Any]] = []
+        self._path_sync_task_active = False
         self._undo_stack: list[dict[str, Any]] = []
         self._redo_stack: list[dict[str, Any]] = []
         self._history_applying = False
@@ -292,7 +322,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._main_splitter_left_collapsed = False
         self._applying_main_splitter_width = False
         self._left_notifications_height_pref: int | None = None
+        self._last_recovery_headline = ""
         self.scan_worker_client = ScanWorkerClient(
+            worker_python_path=self._worker_python_path(),
+            worker_script_path=self._worker_script_path("scan_worker.py"),
+            parent=self,
+        )
+        self.background_scan_worker_client = ScanWorkerClient(
             worker_python_path=self._worker_python_path(),
             worker_script_path=self._worker_script_path("scan_worker.py"),
             parent=self,
@@ -305,6 +341,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scan_worker_client.message_received.connect(self._handle_scan_worker_message)
         self.scan_worker_client.stderr_received.connect(self._on_scan_worker_stderr)
         self.scan_worker_client.worker_failed.connect(self._on_scan_worker_failed)
+        self.background_scan_worker_client.stderr_received.connect(self._on_background_scan_worker_stderr)
+        self.background_scan_worker_client.worker_failed.connect(self._on_background_scan_worker_failed)
         self.render_worker_client.message_received.connect(self._handle_render_worker_message)
         self.render_worker_client.stderr_received.connect(self._append_render_worker_stderr)
         self.render_worker_client.worker_failed.connect(self._on_render_worker_failed)
@@ -314,9 +352,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 project_houdini_scripts_dir=self._project_houdini_scripts_dir,
                 hooks_dir_path=lambda: self.config.hooks_dir,
                 hbatch_exists=self._hbatch_exists,
-                scan_in_progress=self._scan_in_progress,
+                scan_in_progress=lambda: self._create_job_scan_in_progress,
                 send_scan_request=self._send_scan_worker_request,
-                request_scan_sync=lambda message_type, payload, timeout_ms: self._request_scan_worker_sync(
+                request_scan_sync=lambda message_type, payload, timeout_ms: self._request_background_scan_worker_sync(
                     message_type,
                     payload,
                     timeout_ms=timeout_ms,
@@ -422,6 +460,54 @@ class MainWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self._apply_main_splitter_left_width_pref)
         QtCore.QTimer.singleShot(0, self._apply_left_splitter_default_sizes)
 
+    def _begin_interaction_lock(self, status_text: str | None = None) -> None:
+        self._interaction_block_depth += 1
+        if self._interaction_block_depth != 1:
+            return
+        self._prepare_view_for_locked_refresh(getattr(self, "queue_table", None))
+        self._prepare_view_for_locked_refresh(getattr(self, "queue_tree", None))
+        central = self.centralWidget()
+        if central is not None:
+            central.setEnabled(False)
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        if status_text:
+            self._set_status_message(status_text)
+
+    def _end_interaction_lock(self) -> None:
+        if self._interaction_block_depth <= 0:
+            self._interaction_block_depth = 0
+            return
+        self._interaction_block_depth -= 1
+        if self._interaction_block_depth != 0:
+            return
+        central = self.centralWidget()
+        if central is not None:
+            central.setEnabled(True)
+        while QtWidgets.QApplication.overrideCursor() is not None:
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+    @staticmethod
+    def _prepare_view_for_locked_refresh(view: QtWidgets.QAbstractItemView | None) -> None:
+        if view is None:
+            return
+        cancel_inline_edit = getattr(view, "_cancel_inline_edit", None)
+        if callable(cancel_inline_edit):
+            try:
+                cancel_inline_edit()
+            except Exception:
+                pass
+        focus = QtWidgets.QApplication.focusWidget()
+        try:
+            if focus is not None and (focus is view or view.isAncestorOf(focus)):
+                if isinstance(focus, QtWidgets.QWidget):
+                    focus.clearFocus()
+        except Exception:
+            pass
+        try:
+            view.clearFocus()
+        except Exception:
+            pass
+
     @staticmethod
     def _dropped_hip_path(event: QtGui.QDropEvent | QtGui.QDragEnterEvent) -> str | None:
         mime = event.mimeData()
@@ -446,6 +532,116 @@ class MainWindow(QtWidgets.QMainWindow):
     def _is_active_job(self, job: RenderJob | None) -> bool:
         return bool(job is not None and self.current_job_id and job.id == self.current_job_id)
 
+    def _is_job_path_sync_locked(self, job: RenderJob | str | None) -> bool:
+        if job is None:
+            return False
+        job_id = str(job if isinstance(job, str) else getattr(job, "id", "") or "").strip()
+        if not job_id:
+            return False
+        return bool(self._path_sync_lock_counts.get(job_id, 0))
+
+    def _begin_path_sync_lock(self, job_ids: list[str]) -> None:
+        locked_ids = [str(job_id or "").strip() for job_id in job_ids if str(job_id or "").strip()]
+        if not locked_ids:
+            return
+        if not self._path_sync_lock_counts:
+            self._path_sync_overlay_progress = 0.0
+            if hasattr(self, "queue_table"):
+                self.queue_table.setProperty("pathSyncOverlayProgress", self._path_sync_overlay_progress)
+            self._path_sync_overlay_timer.start()
+        for job_id in locked_ids:
+            self._path_sync_lock_counts[job_id] = int(self._path_sync_lock_counts.get(job_id, 0)) + 1
+        self.queue_table_model.refresh_jobs_by_id(locked_ids)
+        self._refresh_ui_state()
+
+    def _end_path_sync_lock(self, job_ids: list[str]) -> None:
+        locked_ids = [str(job_id or "").strip() for job_id in job_ids if str(job_id or "").strip()]
+        if not locked_ids:
+            return
+        changed_ids: list[str] = []
+        for job_id in locked_ids:
+            count = int(self._path_sync_lock_counts.get(job_id, 0))
+            if count <= 1:
+                if job_id in self._path_sync_lock_counts:
+                    del self._path_sync_lock_counts[job_id]
+            else:
+                self._path_sync_lock_counts[job_id] = count - 1
+            changed_ids.append(job_id)
+        if not self._path_sync_lock_counts:
+            self._path_sync_overlay_timer.stop()
+            self._path_sync_overlay_progress = 0.0
+            if hasattr(self, "queue_table"):
+                self.queue_table.setProperty("pathSyncOverlayProgress", self._path_sync_overlay_progress)
+                self.queue_table.viewport().update()
+        self.queue_table_model.refresh_jobs_by_id(changed_ids)
+        self._refresh_queue_tree_view()
+        self._refresh_ui_state()
+
+    def _advance_path_sync_overlay(self) -> None:
+        if not self._path_sync_lock_counts:
+            self._path_sync_overlay_timer.stop()
+            self._path_sync_overlay_progress = 0.0
+            if hasattr(self, "queue_table"):
+                self.queue_table.setProperty("pathSyncOverlayProgress", self._path_sync_overlay_progress)
+            return
+        self._path_sync_overlay_progress = (float(self._path_sync_overlay_progress) + 0.0225) % 1.0
+        if hasattr(self, "queue_table"):
+            self.queue_table.setProperty("pathSyncOverlayProgress", self._path_sync_overlay_progress)
+            self.queue_table.viewport().update()
+
+    def _enqueue_path_sync_task(self, task: dict[str, Any]) -> None:
+        self._pending_path_sync_tasks.append(dict(task))
+        self._schedule_next_path_sync_task()
+
+    def _schedule_next_path_sync_task(self) -> None:
+        if self._path_sync_task_active or not self._pending_path_sync_tasks:
+            return
+        self._path_sync_task_active = True
+        QtCore.QTimer.singleShot(0, self._run_next_path_sync_task)
+
+    def _run_next_path_sync_task(self) -> None:
+        if not self._pending_path_sync_tasks:
+            self._path_sync_task_active = False
+            self._refresh_ui_state()
+            return
+        task = self._pending_path_sync_tasks.pop(0)
+        ids = list(task.get("ids", []) or [])
+        before_states = list(task.get("before_states", []) or [])
+        undo_select_job_ids = list(task.get("undo_select_job_ids", []) or [])
+        redo_select_job_ids = list(task.get("redo_select_job_ids", []) or [])
+        refresh_needed = False
+        processed_ids: set[str] = set()
+        try:
+            self._refresh_queue_tree_view()
+            target_jobs = [job for job in self.jobs if job.id in set(ids)]
+            by_hip: dict[str, list[RenderJob]] = {}
+            for job in target_jobs:
+                by_hip.setdefault(str(job.spec.hip_path or ""), []).append(job)
+            for hip_jobs in by_hip.values():
+                self._refresh_jobs_from_rop_metadata(hip_jobs, reset_override_to_rop=False)
+                hip_job_ids = [job.id for job in hip_jobs]
+                processed_ids.update(hip_job_ids)
+                self._end_path_sync_lock(hip_job_ids)
+            self._push_history_command(
+                {
+                    "kind": "update_jobs",
+                    "before": before_states,
+                    "after": self._job_states_for_ids(ids),
+                    "undo_select_job_ids": undo_select_job_ids,
+                    "redo_select_job_ids": redo_select_job_ids,
+                }
+            )
+            self._save_queue_state()
+            refresh_needed = True
+        finally:
+            remaining_ids = [job_id for job_id in ids if job_id not in processed_ids]
+            if remaining_ids:
+                self._end_path_sync_lock(remaining_ids)
+            if refresh_needed:
+                self._refresh_queue_table()
+            self._path_sync_task_active = False
+            self._schedule_next_path_sync_task()
+
     def _worker_script_path(self, filename: str) -> Path:
         return Path(__file__).resolve().with_name(filename)
 
@@ -465,6 +661,15 @@ class MainWindow(QtWidgets.QMainWindow):
         response = self.scan_worker_client.request_sync(message_type, payload, timeout_ms=timeout_ms)
         self._active_scan_request_id = ""
         return response
+
+    def _request_background_scan_worker_sync(
+        self,
+        message_type: str,
+        payload: dict[str, Any],
+        *,
+        timeout_ms: int = 30000,
+    ) -> dict[str, Any] | None:
+        return self.background_scan_worker_client.request_sync(message_type, payload, timeout_ms=timeout_ms)
 
     def _request_scan_worker_sync_payload(
         self,
@@ -497,7 +702,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_scan_worker_failed(self, reason: str) -> None:
         self._active_scan_request_id = ""
+        self._create_job_scan_in_progress = False
         safe_message(self, "Scan Worker", reason, self.scan_worker_client.last_stderr_text or None)
+        self._set_status_message(reason, 5000)
+        self._refresh_ui_state()
+
+    def _on_background_scan_worker_stderr(self, text: str) -> None:
+        if text:
+            self._append_log("Stderr", text)
+
+    def _on_background_scan_worker_failed(self, reason: str) -> None:
+        self._append_log("Stderr", f"[Background Scan Worker] {reason}\n")
         self._set_status_message(reason, 5000)
         self._refresh_ui_state()
 
@@ -995,39 +1210,48 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_retry_delay.setValue(self._default_retry_delay())
         self.spin_retry_delay.setFixedWidth(84)
 
-        sep_chunk_retry = QtWidgets.QFrame()
-        sep_chunk_retry.setFrameShape(QtWidgets.QFrame.Shape.VLine)
-        sep_chunk_retry.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
-        sep_chunk_retry.setObjectName("toolbarSeparator")
         sep_buttons_chunk = QtWidgets.QFrame()
         sep_buttons_chunk.setFrameShape(QtWidgets.QFrame.Shape.VLine)
         sep_buttons_chunk.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
         sep_buttons_chunk.setObjectName("toolbarSeparator")
-        sep_retry_monitor = QtWidgets.QFrame()
-        sep_retry_monitor.setFrameShape(QtWidgets.QFrame.Shape.VLine)
-        sep_retry_monitor.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
-        sep_retry_monitor.setObjectName("toolbarSeparator")
+        sep_buttons_chunk.setFixedWidth(1)
+        sep_buttons_chunk.setFixedHeight(24)
+        sep_monitor_search = QtWidgets.QFrame()
+        sep_monitor_search.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+        sep_monitor_search.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
+        sep_monitor_search.setObjectName("toolbarSeparator")
+        sep_monitor_search.setFixedWidth(1)
+        sep_monitor_search.setFixedHeight(24)
 
         controls_row.addWidget(self.btn_start_queue)
         controls_row.addWidget(self.btn_pause_queue)
         controls_row.addWidget(self.btn_stop_queue)
-        controls_row.addSpacing(4)
+        controls_row.addSpacing(10)
         controls_row.addWidget(sep_buttons_chunk)
-        controls_row.addSpacing(4)
+        controls_row.addSpacing(10)
         controls_row.addWidget(self.chk_enable_chunking)
         controls_row.addWidget(self.spin_chunk_size)
-        controls_row.addSpacing(4)
-        controls_row.addWidget(sep_chunk_retry)
-        controls_row.addSpacing(4)
+        controls_row.addSpacing(8)
         controls_row.addWidget(self.lbl_retry)
         controls_row.addWidget(self.spin_auto_retry)
         controls_row.addWidget(self.lbl_delay)
         controls_row.addWidget(self.spin_retry_delay)
-        controls_row.addSpacing(4)
-        controls_row.addWidget(sep_retry_monitor)
-        controls_row.addSpacing(4)
+        controls_row.addSpacing(8)
         controls_row.addWidget(self.chk_disable_husk_mplay)
+        controls_row.addWidget(sep_monitor_search)
+        controls_row.addSpacing(10)
         controls_row.addStretch(1)
+        self.queue_search_edit = QtWidgets.QLineEdit()
+        self.queue_search_edit.setPlaceholderText("Search queue...")
+        self.queue_search_edit.setClearButtonEnabled(True)
+        self.queue_search_edit.setFixedWidth(190)
+        self.queue_search_edit.textChanged.connect(self._on_queue_filter_changed)
+        controls_row.addWidget(self.queue_search_edit)
+        self.queue_status_filter = QtWidgets.QComboBox()
+        for label, value in QUEUE_STATUS_FILTER_OPTIONS:
+            self.queue_status_filter.addItem(label, value)
+        self.queue_status_filter.currentIndexChanged.connect(self._on_queue_filter_changed)
+        controls_row.addWidget(self.queue_status_filter)
         self.queue_file_menu_button = QtWidgets.QToolButton()
         self.queue_file_menu_button.setObjectName("queueFileMenuButton")
         self.queue_file_menu_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly)
@@ -1059,36 +1283,39 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_host_layout.addLayout(controls_row)
         layout.addWidget(controls_host)
 
-        self.queue_table = QueueTableWidget(0, 17)
-        self.queue_table.setHorizontalHeaderLabels(
-            [
-                "Name",
-                "HIP",
-                "ROP",
-                "Frame Range",
-                "Step",
-                "Frame Handling",
-                "Status",
-                "Progress",
-                "Phase",
-                "Remaining",
-                "Frame",
-                "Frame Time",
-                "Avg Frame Time",
-                "Started",
-                "Completed",
-                "Render Time",
-                "Output",
-            ]
+        self.queue_table = QueueTableWidget()
+        self.queue_table_model = QueueTableModel(
+            QueueTableModelHooks(
+                jobs_provider=lambda: self.jobs,
+                is_active_job=self._is_active_job,
+                job_phase_display=self._job_phase_display,
+                job_time_remaining_display=self._job_time_remaining_display,
+                job_frame_display=self._job_frame_display,
+                job_started_time_display=self._job_started_time_display,
+                job_end_time_display=self._job_end_time_display,
+                job_total_time_display=self._job_total_time_display,
+                queue_progress_split_values=self._queue_progress_split_values,
+                edit_job_column=self._apply_queue_cell_edit,
+                can_edit_job_column=lambda job, column: can_edit_job_column(
+                    job,
+                    column=column,
+                    is_active_job=self._is_active_job(job),
+                    is_locked=self._is_job_path_sync_locked(job),
+                ).allowed,
+                is_job_path_sync_locked=self._is_job_path_sync_locked,
+                row_style_payload=self._queue_row_style_payload,
+                theme_icon_path=self._theme_icon_path,
+            ),
+            self.queue_table,
         )
+        self.queue_filter_proxy = QueueFilterProxyModel(self.queue_table)
+        self.queue_filter_proxy.setSourceModel(self.queue_table_model)
+        self.queue_table.setModel(self.queue_filter_proxy)
         self.queue_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.queue_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.queue_table.setEditTriggers(
-            QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
-            | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
-        )
+        self.queue_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.queue_table.setAlternatingRowColors(True)
-        self.queue_table.setItemDelegate(QueueTableItemDelegate(self.queue_table))
+        self.queue_table.setItemDelegate(QueueTableItemDelegate())
         self.queue_table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.queue_table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.queue_table.verticalScrollBar().setSingleStep(20)
@@ -1128,8 +1355,9 @@ class MainWindow(QtWidgets.QMainWindow):
             logical: int(self.queue_table.columnWidth(logical)) for logical in range(self.queue_table.columnCount())
         }
         self.queue_table.stats_split_after_visual_index = 6
-        self.queue_table.itemSelectionChanged.connect(self._on_queue_selection_changed)
-        self.queue_table.itemChanged.connect(self._on_queue_item_changed)
+        queue_selection_model = self.queue_table.selectionModel()
+        if queue_selection_model is not None:
+            queue_selection_model.selectionChanged.connect(lambda *_args: self._on_queue_selection_changed())
         self.queue_table.frame_handling_chosen.connect(self._on_queue_frame_handling_chosen)
         self.queue_table.row_reordered_by_drag.connect(self._on_queue_row_drag_reordered)
         self.queue_table.rows_reordered_by_drag.connect(self._on_queue_rows_drag_reordered)
@@ -1185,6 +1413,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_clear_log_view = QtWidgets.QPushButton("Clear View")
         self.btn_clear_log_view.clicked.connect(self._clear_log_view_only)
         filter_row.addWidget(self.btn_clear_log_view)
+        self.btn_copy_diagnostics = QtWidgets.QPushButton("Copy Diagnostics")
+        self.btn_copy_diagnostics.clicked.connect(self._copy_diagnostics)
+        filter_row.addWidget(self.btn_copy_diagnostics)
         self.btn_open_log_file = QtWidgets.QPushButton("Open Log File")
         self.btn_open_log_file.clicked.connect(self._open_selected_job_log)
         filter_row.addWidget(self.btn_open_log_file)
@@ -1306,14 +1537,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self._reset_queue_view_to_defaults()
             self._apply_queue_view_from_persisted_data(queue_view)
             self._clear_history()
-            interrupted_count = sum(1 for job in self.jobs if job.runtime.status == JobStatus.INTERRUPTED)
+            recovery_summary = build_startup_recovery_summary(self.jobs)
             if self.jobs:
                 self._refresh_queue_table(select_row=0)
             else:
                 self._refresh_queue_table()
-            if interrupted_count:
-                self._append_log("Stderr", f"[Recovery] Recovered {interrupted_count} interrupted job(s) from the last session.\n")
-                self._set_status_message(f"Recovered {interrupted_count} interrupted job(s)", 6000)
+            if recovery_summary is not None:
+                self._last_recovery_headline = recovery_summary.headline
+                self._append_notification_message(recovery_summary.headline, "warning")
+                self._append_log("Stderr", f"[Recovery] {recovery_summary.headline}\n")
+                for notice in recovery_summary.notices:
+                    self._append_notification_message(notice.message, notice.severity)
+                    self._append_log("Stderr", f"[Recovery] {notice.technical_message}\n")
+                self._set_status_message(recovery_summary.headline, 6000)
+            else:
+                self._last_recovery_headline = ""
             return True
         except Exception as exc:
             self._append_log("Stderr", f"[Queue] Failed to load queue: {exc}\n")
@@ -1359,6 +1597,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.queue_table.combo_bg_color = QtGui.QColor(t["button_bg"])
             self.queue_table.combo_text_color = QtGui.QColor(t["button_text"])
             self.queue_table.combo_border_color = QtGui.QColor("#555555")
+            self.queue_table.setProperty("pathSyncOverlayProgress", self._path_sync_overlay_progress)
             self.queue_table.viewport().update()
             self._refresh_queue_table()
         if hasattr(self, "queue_tree"):
@@ -1544,15 +1783,43 @@ class MainWindow(QtWidgets.QMainWindow):
             hook_paths=hook_paths,
         )
 
+    def _queue_proxy_model(self) -> QueueFilterProxyModel | None:
+        proxy = getattr(self, "queue_filter_proxy", None)
+        return proxy if isinstance(proxy, QueueFilterProxyModel) else None
+
+    def _queue_source_row_from_view_row(self, view_row: int) -> int:
+        proxy = self._queue_proxy_model()
+        if proxy is None:
+            return int(view_row)
+        proxy_index = proxy.index(int(view_row), 0)
+        if not proxy_index.isValid():
+            return -1
+        source_index = proxy.mapToSource(proxy_index)
+        return int(source_index.row()) if source_index.isValid() else -1
+
+    def _queue_view_index_from_source_row(self, source_row: int, column: int = 0) -> QtCore.QModelIndex:
+        proxy = self._queue_proxy_model()
+        source_index = self.queue_table_model.index(int(source_row), int(column))
+        if proxy is None:
+            return source_index
+        return proxy.mapFromSource(source_index)
+
     def _selected_row(self) -> int:
-        rows = self.queue_table.selectionModel().selectedRows()
-        return rows[0].row() if rows else -1
+        model = self.queue_table.selectionModel()
+        rows = model.selectedRows() if model is not None else []
+        return self._queue_source_row_from_view_row(rows[0].row()) if rows else -1
 
     def _selected_rows(self) -> list[int]:
         model = self.queue_table.selectionModel()
         if model is None:
             return []
-        rows = sorted({idx.row() for idx in model.selectedRows() if idx.isValid()})
+        rows = sorted(
+            {
+                self._queue_source_row_from_view_row(idx.row())
+                for idx in model.selectedRows()
+                if idx.isValid()
+            }
+        )
         return [r for r in rows if 0 <= r < len(self.jobs)]
 
     def _selected_jobs(self) -> list[RenderJob]:
@@ -1600,6 +1867,20 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         return False
 
+    def _on_queue_filter_changed(self) -> None:
+        proxy = self._queue_proxy_model()
+        if proxy is None:
+            return
+        selected_ids = self._selected_job_ids()
+        proxy.set_search_text(self.queue_search_edit.text() if hasattr(self, "queue_search_edit") else "")
+        current_value = ""
+        if hasattr(self, "queue_status_filter") and self.queue_status_filter is not None:
+            current_value = str(self.queue_status_filter.currentData() or "")
+        proxy.set_status_filter(current_value)
+        proxy.set_enabled_only(False)
+        self._refresh_queue_table(select_job_ids=selected_ids or None)
+        self._refresh_ui_state()
+
     def _flush_pending_queue_refresh(self) -> None:
         if not self._pending_queue_refresh_args:
             return
@@ -1610,9 +1891,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pending_queue_refresh_args = None
         self._refresh_queue_table(**args)
 
-    @staticmethod
-    def _is_job_runnable(job: RenderJob | None) -> bool:
-        return is_job_runnable(job)
+    def _is_job_runnable(self, job: RenderJob | None) -> bool:
+        return is_job_runnable(job, is_locked=self._is_job_path_sync_locked(job))
 
     def _reset_job_state(self, job: RenderJob) -> None:
         reset_job_state_model(job)
@@ -1674,13 +1954,29 @@ class MainWindow(QtWidgets.QMainWindow):
     def _defer_refresh_queue_tree_view(self) -> None:
         QtCore.QTimer.singleShot(0, self._refresh_queue_tree_view)
 
-    def _defer_save_and_refresh_queue(self, select_job_ids: list[str] | None = None) -> None:
+    def _defer_save_and_refresh_queue(
+        self,
+        select_job_ids: list[str] | None = None,
+        *,
+        block_interaction: bool = False,
+        status_text: str | None = None,
+    ) -> None:
         ids = list(select_job_ids or [])
+        if block_interaction:
+            self._begin_interaction_lock(status_text or "Applying change...")
+
+        def _finish(ids: list[str]) -> None:
+            try:
+                self._save_and_refresh_queue(
+                    select_job_ids=self._selection_ids_for_refresh(ids)
+                )
+            finally:
+                if block_interaction:
+                    self._end_interaction_lock()
+
         QtCore.QTimer.singleShot(
             0,
-            lambda ids=ids: self._save_and_refresh_queue(
-                select_job_ids=self._selection_ids_for_refresh(ids)
-            ),
+            lambda ids=ids: _finish(ids),
         )
 
     def _tree_context_target_jobs(self, index: QtCore.QModelIndex) -> list[RenderJob]:
@@ -1709,7 +2005,8 @@ class MainWindow(QtWidgets.QMainWindow):
         menu = QtWidgets.QMenu(self)
         act_select = menu.addAction("Select")
         act_remove = menu.addAction("Remove")
-        act_remove.setEnabled(any(not self._is_active_job(job) for job in target_jobs))
+        any_locked = any(self._is_job_path_sync_locked(job) for job in target_jobs)
+        act_remove.setEnabled((not any_locked) and any(not self._is_active_job(job) for job in target_jobs))
 
         chosen = menu.exec(self.queue_tree.viewport().mapToGlobal(pos))
         if chosen is None:
@@ -1718,6 +2015,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_queue_table(select_job_ids=[job.id for job in target_jobs])
             return
         if chosen == act_remove:
+            if any_locked:
+                safe_message(self, "Please Wait", "Wait for the current path update to finish.")
+                return
             removable = [job for job in target_jobs if not self._is_active_job(job)]
             if not removable:
                 safe_message(self, "Cannot Remove", "Cannot remove the active running job.")
@@ -1758,6 +2058,19 @@ class MainWindow(QtWidgets.QMainWindow):
             normalize_output_display_path=self._normalize_output_display_path,
         )
 
+    def _apply_hip_path_change_immediately(self, old_hip: str, new_hip: str) -> list[str]:
+        changed_jobs = apply_hip_path_change_model(
+            self.jobs,
+            old_hip=old_hip,
+            new_hip=new_hip,
+            running_status=JobStatus.RUNNING,
+        )
+        return [job.id for job in changed_jobs]
+
+    def _affected_job_ids_for_hip_path_change(self, old_hip: str) -> list[str]:
+        old_key = str(old_hip or "").strip()
+        return [job.id for job in self.jobs if str(job.spec.hip_path or "").strip() == old_key]
+
     def _propagate_rop_path_change(self, hip_path: str, old_rop: str, new_rop: str) -> list[str]:
         return propagate_rop_path_change_model(
             self.jobs,
@@ -1770,6 +2083,25 @@ class MainWindow(QtWidgets.QMainWindow):
             restore_job_online_status=self._restore_job_online_status,
             normalize_output_display_path=self._normalize_output_display_path,
         )
+
+    def _apply_rop_path_change_immediately(self, hip_path: str, old_rop: str, new_rop: str) -> list[str]:
+        changed_jobs = apply_rop_path_change_model(
+            self.jobs,
+            hip_path=hip_path,
+            old_rop=old_rop,
+            new_rop=new_rop,
+            running_status=JobStatus.RUNNING,
+        )
+        return [job.id for job in changed_jobs]
+
+    def _affected_job_ids_for_rop_path_change(self, hip_path: str, old_rop: str) -> list[str]:
+        hip_key = str(hip_path or "").strip()
+        old_key = str(old_rop or "").strip()
+        return [
+            job.id
+            for job in self.jobs
+            if str(job.spec.hip_path or "").strip() == hip_key and str(job.spec.rop_path or "").strip() == old_key
+        ]
 
     def _refresh_jobs_from_rop_metadata(
         self,
@@ -1789,6 +2121,39 @@ class MainWindow(QtWidgets.QMainWindow):
             reset_override_to_rop=reset_override_to_rop,
         )
 
+    def _sync_jobs_after_path_change(self, target_jobs: list[RenderJob]) -> list[str]:
+        sync_jobs_after_path_change_model(
+            target_jobs,
+            probe_rop_info=self._probe_rop_info,
+            mark_job_offline=self._mark_job_offline,
+            restore_job_online_status=self._restore_job_online_status,
+            normalize_output_display_path=self._normalize_output_display_path,
+        )
+        return [job.id for job in target_jobs]
+
+    def _defer_finalize_path_change(
+        self,
+        *,
+        changed_ids: list[str],
+        before_states: list[dict[str, Any]],
+        undo_select_job_ids: list[str],
+        redo_select_job_ids: list[str],
+        status_text: str,
+    ) -> None:
+        ids = [job_id for job_id in changed_ids if job_id]
+        if not ids:
+            return
+        self._begin_path_sync_lock(ids)
+        self._enqueue_path_sync_task(
+            {
+                "ids": ids,
+                "before_states": list(before_states),
+                "undo_select_job_ids": list(undo_select_job_ids),
+                "redo_select_job_ids": list(redo_select_job_ids),
+                "status_text": status_text,
+            }
+        )
+
     def _on_queue_tree_item_changed(self, item: QtGui.QStandardItem) -> None:
         if getattr(self, "_suppress_tree_item_changed", False):
             return
@@ -1800,7 +2165,7 @@ class MainWindow(QtWidgets.QMainWindow):
             old_hip = str(item.data(TREE_HIP_ROLE) or "").strip()
             old_rop = str(item.data(TREE_ROP_ROLE) or "").strip()
             if kind == "hip":
-                target_ids = [job.id for job in self.jobs if job.spec.hip_path == old_hip]
+                target_ids = self._affected_job_ids_for_hip_path_change(old_hip)
                 before_states = self._job_states_for_ids(target_ids)
                 if not text:
                     self._defer_refresh_queue_tree_view()
@@ -1811,22 +2176,25 @@ class MainWindow(QtWidgets.QMainWindow):
                     safe_message(self, "Invalid Path", str(exc))
                     self._defer_refresh_queue_tree_view()
                     return
-                changed_ids = self._propagate_hip_path_change(old_hip, text)
-                after_states = self._job_states_for_ids(changed_ids)
-                if changed_ids:
-                    self._push_history_command(
-                        {
-                            "kind": "update_jobs",
-                            "before": before_states,
-                            "after": after_states,
-                            "undo_select_job_ids": target_ids,
-                            "redo_select_job_ids": changed_ids,
-                        }
-                    )
-                self._defer_save_and_refresh_queue(changed_ids)
+                if text == old_hip:
+                    if item.text() != old_hip:
+                        self._suppress_tree_item_changed = True
+                        try:
+                            item.setText(old_hip)
+                        finally:
+                            self._suppress_tree_item_changed = False
+                    return
+                changed_ids = self._apply_hip_path_change_immediately(old_hip, text)
+                self._defer_finalize_path_change(
+                    changed_ids=changed_ids,
+                    before_states=before_states,
+                    undo_select_job_ids=target_ids,
+                    redo_select_job_ids=changed_ids,
+                    status_text="Updating HIP path...",
+                )
                 return
             if kind == "rop":
-                target_ids = [job.id for job in self.jobs if job.spec.hip_path == old_hip and job.spec.rop_path == old_rop]
+                target_ids = self._affected_job_ids_for_rop_path_change(old_hip, old_rop)
                 before_states = self._job_states_for_ids(target_ids)
                 if not text:
                     self._defer_refresh_queue_tree_view()
@@ -1837,19 +2205,22 @@ class MainWindow(QtWidgets.QMainWindow):
                     safe_message(self, "Invalid Path", str(exc))
                     self._defer_refresh_queue_tree_view()
                     return
-                changed_ids = self._propagate_rop_path_change(old_hip, old_rop, text)
-                after_states = self._job_states_for_ids(changed_ids)
-                if changed_ids:
-                    self._push_history_command(
-                        {
-                            "kind": "update_jobs",
-                            "before": before_states,
-                            "after": after_states,
-                            "undo_select_job_ids": target_ids,
-                            "redo_select_job_ids": changed_ids,
-                        }
-                    )
-                self._defer_save_and_refresh_queue(changed_ids)
+                if text == old_rop:
+                    if item.text() != old_rop:
+                        self._suppress_tree_item_changed = True
+                        try:
+                            item.setText(old_rop)
+                        finally:
+                            self._suppress_tree_item_changed = False
+                    return
+                changed_ids = self._apply_rop_path_change_immediately(old_hip, old_rop, text)
+                self._defer_finalize_path_change(
+                    changed_ids=changed_ids,
+                    before_states=before_states,
+                    undo_select_job_ids=target_ids,
+                    redo_select_job_ids=changed_ids,
+                    status_text="Updating ROP path...",
+                )
                 return
         except Exception as exc:
             safe_message(self, "Tree Edit Error", f"Failed to apply tree edit: {exc}", traceback.format_exc())
@@ -1950,34 +2321,50 @@ class MainWindow(QtWidgets.QMainWindow):
         menu = QtWidgets.QMenu(self)
         out_folder = self._output_folder_from_value(job.view.out_path)
         has_finished_jobs = any(j.runtime.status in {JobStatus.DONE, JobStatus.FAILED} for j in self.jobs)
+        any_locked = any(self._is_job_path_sync_locked(j) for j in target_jobs)
         act_toggle = menu.addAction("Disable" if job.spec.enabled else "Enable")
-        act_toggle.setEnabled(not any_active)
+        act_toggle.setEnabled((not any_active) and (not any_locked))
         act_reset = menu.addAction("Reset State")
-        act_reset.setEnabled(not any_active)
+        act_reset.setEnabled((not any_active) and (not any_locked))
         act_reset_cell_cached = None
         if idx.isValid() and idx.column() in {3, 4}:
             menu.addSeparator()
             act_reset_cell_cached = menu.addAction("Reset Value")
-            act_reset_cell_cached.setEnabled(any(self._job_can_reset_cached_cell(t, idx.column()) for t in target_jobs))
+            act_reset_cell_cached.setEnabled((not any_locked) and any(self._job_can_reset_cached_cell(t, idx.column()) for t in target_jobs))
         act_reload_from_rop = menu.addAction("Reload from File")
-        act_reload_from_rop.setEnabled(bool((not any_active) and self._hbatch_exists()))
+        reload_decision = can_reload_jobs_from_file(
+            target_jobs=target_jobs,
+            is_active_job_fn=self._is_active_job,
+            hbatch_exists=self._hbatch_exists(),
+            is_locked_job_fn=self._is_job_path_sync_locked,
+        )
+        act_reload_from_rop.setEnabled(reload_decision.allowed)
         menu.addSeparator()
         duplicate_decision = can_duplicate_jobs(
             target_jobs,
             is_active_job_fn=self._is_active_job,
             scan_in_progress=self._scan_in_progress(),
+            is_locked_job_fn=self._is_job_path_sync_locked,
         )
         act_duplicate = menu.addAction("Duplicate")
         act_duplicate.setEnabled(duplicate_decision.allowed)
         act_remove = menu.addAction("Remove")
-        act_remove.setEnabled(not any_active)
+        act_remove.setEnabled((not any_active) and (not any_locked))
         act_clear_finished = menu.addAction("Clear Finished")
         act_clear_finished.setEnabled(has_finished_jobs)
         menu.addSeparator()
+        preview_path = self._job_preview_path(job)
+        preview_player_path = self._current_player_path()
+        preview_decision = can_preview_job(
+            preview_path_exists=bool(preview_path),
+            player_path_set=bool(preview_player_path),
+            player_exists=bool(preview_player_path and Path(preview_player_path).exists()),
+        )
         act_preview = menu.addAction("Preview")
-        act_preview.setEnabled(bool(self._current_player_path()) and bool(self._job_preview_path(job)))
+        act_preview.setEnabled(preview_decision.allowed)
         act_open_folder = menu.addAction("Open Folder")
-        act_open_folder.setEnabled(bool(out_folder and out_folder.exists()))
+        open_folder_decision = can_open_output_folder(folder_exists=bool(out_folder and out_folder.exists()))
+        act_open_folder.setEnabled(open_folder_decision.allowed)
 
         chosen = menu.exec(self.queue_table.viewport().mapToGlobal(pos))
         if chosen is None:
@@ -2039,6 +2426,9 @@ class MainWindow(QtWidgets.QMainWindow):
         elif chosen == act_reload_from_rop:
             target_ids = [j.id for j in target_jobs]
             before_states = self._job_states_for_ids(target_ids)
+            if not reload_decision.allowed:
+                safe_message(self, "Reload From File", reload_decision.reason)
+                return
             try:
                 changed_ids = self._refresh_jobs_from_rop_metadata(target_jobs, reset_override_to_rop=True)
             except Exception as exc:
@@ -2206,22 +2596,19 @@ class MainWindow(QtWidgets.QMainWindow):
         sample_file_path = (job.view.out_file_sample_path or "").strip()
         out_path = (job.view.out_path or "").strip()
         probe_path = sample_file_path or out_path
-        if job.spec.strict_frame_range:
-            if interactive:
-                safe_message(self, "Resume From Output", "Cannot resume from output on a Strict frame range ROP.")
+        strict_decision = validate_resume_from_output_inputs(strict_frame_range=job.spec.strict_frame_range)
+        if not strict_decision.valid:
+            if interactive and strict_decision.title:
+                safe_message(self, strict_decision.title, strict_decision.message)
             return None
         resolved = self._resolve_job_range_for_execution(job, mutate_job=False)
-        if resolved is None:
-            if job.runtime.status == JobStatus.OFFLINE:
-                return None
-            if interactive:
-                safe_message(self, "Resume From Output", "Cannot resolve frame range for this job.")
+        resolved_decision = validate_resolved_frame_range_for_resume(resolved, offline=job.runtime.status == JobStatus.OFFLINE)
+        if not resolved_decision.valid:
+            if interactive and resolved_decision.title:
+                safe_message(self, resolved_decision.title, resolved_decision.message)
             return None
+        assert resolved is not None
         start_frame, end_frame, step = resolved
-        if step <= 0 or end_frame < start_frame:
-            if interactive:
-                safe_message(self, "Resume From Output", "Invalid job frame range for resume.")
-            return None
 
         # If we only have a folder (or an unpatterned path), refresh metadata from the ROP first.
         # This often gives us a resolved sample filename path without needing to start the render.
@@ -2253,19 +2640,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 probe_path = refreshed_sample
                 sample_file_path = refreshed_sample
 
-        if not probe_path or probe_path.lower() == "ip":
-            if interactive:
-                safe_message(self, "Resume From Output", "Cannot resume: output path is unavailable.")
-            return None
-
-        if self._frame_sequence_path_for_frame(probe_path, start_frame) is None:
-            if interactive:
-                safe_message(
-                    self,
-                    "Resume From Output",
-                    "Could not resolve a reliable output filename pattern from the ROP. "
-                    "Use Reload from ROP (or start a render once) so the app can capture the exact output pattern.",
-                )
+        probe_decision = validate_resume_probe_path(
+            probe_path=probe_path,
+            pattern_resolved=self._frame_sequence_path_for_frame(probe_path, start_frame) is not None,
+        )
+        if not probe_decision.valid:
+            if interactive and probe_decision.title:
+                safe_message(self, probe_decision.title, probe_decision.message)
             return None
 
         total = ((end_frame - start_frame) // step) + 1
@@ -2309,15 +2690,13 @@ class MainWindow(QtWidgets.QMainWindow):
         interactive: bool = True,
     ) -> tuple[list[tuple[int, int, int]], int] | None:
         resolved = self._resolve_job_range_for_execution(job, mutate_job=False)
-        if resolved is None:
-            if interactive and job.runtime.status != JobStatus.OFFLINE:
-                safe_message(self, "Render Missing", "Cannot resolve frame range for this job.")
+        resolved_decision = validate_render_missing_inputs(resolved, offline=job.runtime.status == JobStatus.OFFLINE)
+        if not resolved_decision.valid:
+            if interactive and resolved_decision.title:
+                safe_message(self, resolved_decision.title, resolved_decision.message)
             return None
+        assert resolved is not None
         start_frame, end_frame, step = resolved
-        if step <= 0 or end_frame < start_frame:
-            if interactive:
-                safe_message(self, "Render Missing", "Invalid job frame range.")
-            return None
 
         sample_file_path = (job.view.out_file_sample_path or "").strip()
         out_path = (job.view.out_path or "").strip()
@@ -2345,18 +2724,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if refreshed_sample:
                 probe_path = refreshed_sample
 
-        if not probe_path or probe_path.lower() == "ip":
-            if interactive:
-                safe_message(self, "Render Missing", "Cannot evaluate outputs: output path is unavailable.")
-            return None
-
-        if self._frame_sequence_path_for_frame(probe_path, start_frame) is None:
-            if interactive:
-                safe_message(
-                    self,
-                    "Render Missing",
-                    "Could not resolve a reliable output filename pattern from the ROP.",
-                )
+        probe_decision = validate_render_missing_probe_path(
+            probe_path=probe_path,
+            pattern_resolved=self._frame_sequence_path_for_frame(probe_path, start_frame) is not None,
+        )
+        if not probe_decision.valid:
+            if interactive and probe_decision.title:
+                safe_message(self, probe_decision.title, probe_decision.message)
             return None
 
         existing_count = 0
@@ -2393,20 +2767,20 @@ class MainWindow(QtWidgets.QMainWindow):
         return runs, existing_count
 
     def _resume_job_from_output(self, job: RenderJob) -> None:
-        if self._render_job_active() or self.queue_active:
-            return
-        if job.runtime.status not in {JobStatus.CANCELED, JobStatus.INTERRUPTED, JobStatus.QUEUED, JobStatus.DONE}:
-            return
-        if not Path(job.spec.hip_path).exists():
-            self._mark_job_offline(job, "HIP file not found.")
-            self._save_queue_state()
-            self._refresh_queue_table(select_job_id=job.id)
-            return
-        if not self._hbatch_exists():
-            safe_message(self, "hbatch Missing", "Configure a valid hbatch.exe path before resuming.")
-            return
-        if not job.spec.enabled:
-            safe_message(self, "Resume From Output", "Job is disabled.")
+        decision = can_resume_job_from_output(
+            job,
+            render_job_active=self._render_job_active(),
+            queue_active=self.queue_active,
+            hip_exists=Path(job.spec.hip_path).exists(),
+            hbatch_exists=self._hbatch_exists(),
+        )
+        if not decision.allowed:
+            if decision.reason == "HIP file not found.":
+                self._mark_job_offline(job, "HIP file not found.")
+                self._save_queue_state()
+                self._refresh_queue_table(select_job_id=job.id)
+            elif decision.reason:
+                safe_message(self, "Resume From Output", decision.reason)
             return
         resume_info = self._compute_resume_from_output(job)
         if resume_info is None:
@@ -2581,7 +2955,14 @@ class MainWindow(QtWidgets.QMainWindow):
         previous_selection = self._selected_job_ids()
         selected_jobs = [self.jobs[r] for r in rows if 0 <= r < len(self.jobs)]
         removable_rows = [r for r in rows if not self._is_active_job(self.jobs[r])]
-        remove_decision = can_remove_jobs(selected_jobs, is_active_job_fn=self._is_active_job)
+        remove_decision = can_remove_jobs(
+            selected_jobs,
+            is_active_job_fn=self._is_active_job,
+            is_locked_job_fn=self._is_job_path_sync_locked,
+        )
+        if not remove_decision.allowed:
+            safe_message(self, "Cannot Remove", remove_decision.reason)
+            return
         if not removable_rows:
             safe_message(self, "Cannot Remove", f"{remove_decision.reason} Use Stop to cancel it.")
             return
@@ -2624,6 +3005,7 @@ class MainWindow(QtWidgets.QMainWindow):
             source_jobs,
             is_active_job_fn=self._is_active_job,
             scan_in_progress=self._scan_in_progress(),
+            is_locked_job_fn=self._is_job_path_sync_locked,
         )
         if not duplicate_decision.allowed:
             return
@@ -2641,40 +3023,40 @@ class MainWindow(QtWidgets.QMainWindow):
             clone = self._job_from_persisted_dict(self._job_to_persisted_dict(source))
             if clone is None:
                 continue
-            clone.id = uuid4().hex
-            clone.status = JobStatus.QUEUED
-            clone.started_at = None
-            clone.finished_at = None
-            clone.exit_code = None
-            clone.error_summary = ""
-            clone.offline_detected_reason = ""
-            clone.progress_text = "-"
-            clone.percent_text = "-"
-            clone.usd_build_percent = None
-            clone.last_frame_seen = None
-            clone.build_pass_completed = False
-            clone.phase_text = ""
-            clone.prev_frame_time_text = "-"
-            clone.avg_frame_time_text = "-"
-            clone.est_job_time_text = "-"
-            clone.render_frame_started_at = {}
-            clone.render_frame_durations_sec = []
-            clone.render_completed_frames = set()
-            clone.offline_previous_status = None
-            clone.resume_start_frame_runtime = None
-            clone.resume_end_frame_runtime = None
-            clone.resume_step_runtime = None
-            clone.resume_completed_baseline_count = 0
-            clone.chunk_start_frame_runtime = None
-            clone.chunk_end_frame_runtime = None
-            clone.chunk_step_runtime = None
-            clone.chunk_index_runtime = 0
-            clone.chunk_total_runtime = 0
-            clone.chunk_attempt_runtime = 0
-            clone.chunk_retry_count_runtime = 0
-            clone.chunk_ranges_runtime = []
-            clone.chunk_retry_total_failures_runtime = 0
-            clone.log_file_path = str(self.config.new_job_log_path(clone.display_name()))
+            clone.spec.id = uuid4().hex
+            clone.runtime.status = JobStatus.QUEUED
+            clone.runtime.started_at = None
+            clone.runtime.finished_at = None
+            clone.runtime.exit_code = None
+            clone.runtime.error_summary = ""
+            clone.runtime.offline_detected_reason = ""
+            clone.view.progress_text = "-"
+            clone.view.percent_text = "-"
+            clone.view.usd_build_percent = None
+            clone.view.last_frame_seen = None
+            clone.view.build_pass_completed = False
+            clone.view.phase_text = ""
+            clone.view.prev_frame_time_text = "-"
+            clone.view.avg_frame_time_text = "-"
+            clone.view.est_job_time_text = "-"
+            clone.view.render_frame_started_at = {}
+            clone.view.render_frame_durations_sec = []
+            clone.view.render_completed_frames = set()
+            clone.runtime.offline_previous_status = None
+            clone.runtime.resume_start_frame_runtime = None
+            clone.runtime.resume_end_frame_runtime = None
+            clone.runtime.resume_step_runtime = None
+            clone.runtime.resume_completed_baseline_count = 0
+            clone.runtime.chunk_start_frame_runtime = None
+            clone.runtime.chunk_end_frame_runtime = None
+            clone.runtime.chunk_step_runtime = None
+            clone.runtime.chunk_index_runtime = 0
+            clone.runtime.chunk_total_runtime = 0
+            clone.runtime.chunk_attempt_runtime = 0
+            clone.runtime.chunk_retry_count_runtime = 0
+            clone.runtime.chunk_ranges_runtime = []
+            clone.runtime.chunk_retry_total_failures_runtime = 0
+            clone.runtime.log_file_path = str(self.config.new_job_log_path(clone.display_name()))
             duplicates.append(clone)
         if not duplicates:
             if skipped_running:
@@ -2722,6 +3104,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._save_and_refresh_queue(select_job_ids=list(selected_ids))
 
     def _on_queue_row_drag_reordered(self, source_row: int, target_row: int) -> None:
+        proxy = self._queue_proxy_model()
+        if proxy is not None and proxy.has_active_filters():
+            self._set_status_message("Clear queue filters before reordering.", 3000)
+            self._refresh_queue_table(select_job_ids=self._selected_job_ids() or None)
+            return
+        source_row = self._queue_source_row_from_view_row(source_row)
+        target_row = self._queue_source_row_from_view_row(target_row) if target_row < self.queue_table.rowCount() else len(self.jobs)
         if not (0 <= source_row < len(self.jobs)):
             self._refresh_queue_table()
             return
@@ -2754,7 +3143,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_queue_table(select_row=insert_row)
 
     def _on_queue_rows_drag_reordered(self, source_rows: list[int], target_row: int) -> None:
-        rows = sorted({int(r) for r in source_rows if 0 <= int(r) < len(self.jobs)})
+        proxy = self._queue_proxy_model()
+        if proxy is not None and proxy.has_active_filters():
+            self._set_status_message("Clear queue filters before reordering.", 3000)
+            self._refresh_queue_table(select_job_ids=self._selected_job_ids() or None)
+            return
+        rows = sorted(
+            {
+                self._queue_source_row_from_view_row(int(r))
+                for r in source_rows
+                if self._queue_source_row_from_view_row(int(r)) >= 0
+            }
+        )
+        target_row = self._queue_source_row_from_view_row(target_row) if target_row < self.queue_table.rowCount() else len(self.jobs)
         if not rows:
             self._refresh_queue_table()
             return
@@ -2841,16 +3242,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 if selected is not None:
                     preserved_job_id = selected.id
 
-        table_blocker = QtCore.QSignalBlocker(self.queue_table)
         selection_model = self.queue_table.selectionModel()
         selection_blocker = QtCore.QSignalBlocker(selection_model) if selection_model is not None else None
         try:
-            self._suppress_queue_item_changed = True
             self.queue_table.setUpdatesEnabled(False)
-            self.queue_table.setRowCount(len(self.jobs))
+            self.queue_table_model.refresh_all()
             self.queue_table.clearSelection()
-            for row, job in enumerate(self.jobs):
-                self._populate_queue_row(row, job)
 
             target_job_id = select_job_id or preserved_job_id
             target_job_ids = list(select_job_ids or preserved_job_ids)
@@ -2860,7 +3257,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 if sm is not None:
                     for row, job in enumerate(self.jobs):
                         if job.id in target_job_ids:
-                            model_idx = self.queue_table.model().index(row, 0)
+                            model_idx = self._queue_view_index_from_source_row(row, 0)
+                            if not model_idx.isValid():
+                                continue
                             sm.select(
                                 model_idx,
                                 QtCore.QItemSelectionModel.SelectionFlag.Select
@@ -2870,130 +3269,38 @@ class MainWindow(QtWidgets.QMainWindow):
             elif target_job_id:
                 for row, job in enumerate(self.jobs):
                     if job.id == target_job_id:
-                        self.queue_table.selectRow(row)
-                        selected_applied = True
+                        model_idx = self._queue_view_index_from_source_row(row, 0)
+                        if model_idx.isValid():
+                            self.queue_table.selectRow(model_idx.row())
+                            selected_applied = True
                         break
             elif select_row is not None and self.jobs:
-                self.queue_table.selectRow(max(0, min(select_row, len(self.jobs) - 1)))
-                selected_applied = True
+                model_idx = self._queue_view_index_from_source_row(max(0, min(select_row, len(self.jobs) - 1)), 0)
+                if model_idx.isValid():
+                    self.queue_table.selectRow(model_idx.row())
+                    selected_applied = True
 
             if selected_applied:
                 sm = self.queue_table.selectionModel()
                 row = self._selected_row()
                 if sm is not None and row >= 0:
-                    idx = self.queue_table.model().index(row, 0)
+                    idx = self._queue_view_index_from_source_row(row, 0)
                     sm.setCurrentIndex(idx, QtCore.QItemSelectionModel.SelectionFlag.NoUpdate)
         finally:
-            self._suppress_queue_item_changed = False
             self.queue_table.setUpdatesEnabled(True)
-            del table_blocker
             if selection_blocker is not None:
                 del selection_blocker
 
+        self.queue_table.viewport().update()
         self._refresh_queue_tree_view()
         self._refresh_ui_state()
-
-    def _populate_queue_row(self, row: int, job: RenderJob) -> None:
-        values = [
-            job.display_name(),
-            job.spec.hip_path,
-            job.spec.rop_path,
-            job.frame_range_display(),
-            job.step_display(),
-            job.frame_handling_label(),
-            queue_row_status_label(job),
-            job.view.percent_text or "",
-            self._job_phase_display(job),
-            self._job_time_remaining_display(job),
-            self._job_frame_display(job),
-            job.view.prev_frame_time_text or "-",
-            job.view.avg_frame_time_text or "-",
-            self._job_started_time_display(job),
-            self._job_end_time_display(job),
-            self._job_total_time_display(job),
-            job.view.out_path or "",
-        ]
-        for col, value in enumerate(values):
-            item = self.queue_table.item(row, col)
-            if item is None:
-                item = QtWidgets.QTableWidgetItem()
-                self.queue_table.setItem(row, col, item)
-            item.setText(value)
-            item.setData(QtCore.Qt.ItemDataRole.UserRole + 20, str(job.runtime.status.value))
-            if col == 7:
-                build_pct, render_pct = self._queue_progress_split_values(job)
-                item.setData(QtCore.Qt.ItemDataRole.UserRole + 10, build_pct)
-                item.setData(QtCore.Qt.ItemDataRole.UserRole + 11, render_pct)
-            flags = item.flags()
-            edit_decision = can_edit_job_column(
-                job,
-                column=col,
-                is_active_job=self._is_active_job(job),
-            )
-            if edit_decision.allowed:
-                item.setFlags(flags | QtCore.Qt.ItemFlag.ItemIsEditable)
-            else:
-                item.setFlags(flags & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-            if col == 5:
-                item.setIcon(QtGui.QIcon())
-                item.setToolTip("How this job treats existing output frames before render.")
-            if col in {3, 4}:
-                range_is_overridden = False
-                step_is_overridden = False
-                if job.spec.frame_range_mode == "override":
-                    if (
-                        job.runtime.runtime_start_frame is None
-                        or job.runtime.runtime_end_frame is None
-                        or job.spec.start_frame is None
-                        or job.spec.end_frame is None
-                    ):
-                        range_is_overridden = True
-                    else:
-                        try:
-                            range_is_overridden = not (
-                                int(job.spec.start_frame) == int(job.runtime.runtime_start_frame)
-                                and int(job.spec.end_frame) == int(job.runtime.runtime_end_frame)
-                            )
-                        except Exception:
-                            range_is_overridden = True
-
-                    if job.runtime.runtime_step in (None, 0) or job.spec.step is None:
-                        step_is_overridden = True
-                    else:
-                        try:
-                            step_is_overridden = int(job.spec.step) != int(float(job.runtime.runtime_step))
-                        except Exception:
-                            step_is_overridden = True
-
-                if job.spec.strict_frame_range:
-                    lock_path = str(getattr(self, "_theme_icons", {}).get("lock_orange", "") or "")
-                    item.setIcon(QtGui.QIcon(lock_path) if lock_path else QtGui.QIcon())
-                    item.setToolTip("ROP frame range is Strict (node-controlled).")
-                elif (col == 3 and range_is_overridden) or (col == 4 and step_is_overridden):
-                    dot_path = str(getattr(self, "_theme_icons", {}).get("override_dot_red", "") or "")
-                    item.setIcon(QtGui.QIcon(dot_path) if dot_path else QtGui.QIcon())
-                    item.setToolTip("Overridden value.")
-                else:
-                    item.setIcon(QtGui.QIcon())
-                    if job.spec.frame_range_mode == "use_rop":
-                        item.setToolTip("Using ROP value.")
-                    elif col == 3:
-                        item.setToolTip("Range matches ROP value.")
-                    else:
-                        item.setToolTip("Step matches ROP value.")
-            elif col == 0:
-                item.setToolTip(job.runtime.log_file_path or "")
-            elif col == 16:
-                item.setToolTip(job.view.out_path or "")
-        self._style_row(row, job)
 
     def _refresh_job_row(self, job_id: str) -> None:
         target_id = str(job_id or "").strip()
         if not target_id:
             return
         row = next((idx for idx, job in enumerate(self.jobs) if job.id == target_id), -1)
-        if row < 0 or row >= self.queue_table.rowCount():
-            self._refresh_queue_table(select_job_id=target_id)
+        if row < 0:
             return
         if self._queue_refresh_should_defer():
             self._pending_queue_refresh_args = {
@@ -3003,14 +3310,7 @@ class MainWindow(QtWidgets.QMainWindow):
             }
             self._pending_queue_refresh_timer.start(200)
             return
-        table_blocker = QtCore.QSignalBlocker(self.queue_table)
-        try:
-            self._suppress_queue_item_changed = True
-            self.queue_table.setUpdatesEnabled(False)
-            self._populate_queue_row(row, self.jobs[row])
-        finally:
-            self.queue_table.setUpdatesEnabled(True)
-            self._suppress_queue_item_changed = False
+        self.queue_table_model.refresh_job_by_id(target_id)
         self.queue_table.viewport().update()
         self._refresh_ui_state()
 
@@ -3023,45 +3323,40 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         try:
             self._suppress_tree_item_changed = True
-            refresh_queue_tree_model(tree, model, self.jobs)
+            refresh_queue_tree_model(tree, model, self.jobs, is_locked_job_fn=self._is_job_path_sync_locked)
         finally:
             self._suppress_tree_item_changed = False
 
-    def _style_row(self, row: int, job: RenderJob) -> None:
-        color = None
-        text_color = None
+    def _theme_icon_path(self, key: str) -> str:
+        return str(getattr(self, "_theme_icons", {}).get(key, "") or "")
+
+    def _queue_row_style_payload(self, job: RenderJob, row: int) -> dict[str, Any]:
+        background = None
+        foreground = None
         t = {**DEFAULT_THEME, **getattr(self, "theme", {})}
-        pal = self.queue_table.palette()
-        base_color = pal.color(QtGui.QPalette.ColorRole.AlternateBase if row % 2 else QtGui.QPalette.ColorRole.Base)
-        default_text_color = pal.color(QtGui.QPalette.ColorRole.Text)
         if not job.spec.enabled:
-            color = QtGui.QColor("#161616")
-            text_color = QtGui.QColor("#6f6f6f")
+            background = QtGui.QBrush(QtGui.QColor("#161616"))
+            foreground = QtGui.QBrush(QtGui.QColor("#6f6f6f"))
         elif job.runtime.status == JobStatus.OFFLINE:
-            color = QtGui.QColor("#2f2f2f")
-            text_color = QtGui.QColor("#b0b0b0")
+            background = QtGui.QBrush(QtGui.QColor("#2f2f2f"))
+            foreground = QtGui.QBrush(QtGui.QColor("#b0b0b0"))
         elif job.runtime.status == JobStatus.RUNNING:
-            color = QtGui.QColor(t["queue_running"])
-            text_color = QtGui.QColor("#ffffff")
+            background = QtGui.QBrush(QtGui.QColor(t["queue_running"]))
+            foreground = QtGui.QBrush(QtGui.QColor("#ffffff"))
         elif job.runtime.status == JobStatus.DONE:
-            color = QtGui.QColor(t["queue_done"])
-            text_color = QtGui.QColor("#ffffff")
+            background = QtGui.QBrush(QtGui.QColor(t["queue_done"]))
+            foreground = QtGui.QBrush(QtGui.QColor("#ffffff"))
         elif job.runtime.status == JobStatus.FAILED:
-            color = QtGui.QColor(t["queue_failed"])
-            text_color = QtGui.QColor("#ffffff")
+            background = QtGui.QBrush(QtGui.QColor(t["queue_failed"]))
+            foreground = QtGui.QBrush(QtGui.QColor("#ffffff"))
         elif job.runtime.status == JobStatus.INTERRUPTED:
-            color = QtGui.QColor("#6b4e16")
-            text_color = QtGui.QColor("#ffffff")
-        elif job.runtime.status == JobStatus.CANCELED:
-            color = None
-        for col in range(self.queue_table.columnCount()):
-            item = self.queue_table.item(row, col)
-            if item is not None:
-                if job.runtime.status == JobStatus.OFFLINE:
-                    item.setBackground(QtGui.QBrush(QtGui.QColor("#2f2f2f")))
-                else:
-                    item.setBackground(QtGui.QBrush(color if color else base_color))
-                item.setForeground(QtGui.QBrush(text_color if text_color else default_text_color))
+            background = QtGui.QBrush(QtGui.QColor("#6b4e16"))
+            foreground = QtGui.QBrush(QtGui.QColor("#ffffff"))
+        return {
+            "background": background,
+            "foreground": foreground,
+            "row": row,
+        }
 
     def _append_log(self, source: str, text: str) -> None:
         if not text:
@@ -3069,6 +3364,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_entries.append((source, text))
         self._append_to_log_view_if_matches(source, text)
         self._append_notifications(source, text)
+
+    def _append_notification_message(self, message: str, severity: str = "info") -> None:
+        if not message:
+            return
+        if not hasattr(self, "notifications_list") or self.notifications_list is None:
+            return
+        item = QtWidgets.QListWidgetItem(str(message))
+        item.setIcon(self._notification_icon_for_severity(severity))
+        item.setForeground(QtGui.QBrush(self._notification_color_for_severity(severity)))
+        self.notifications_list.addItem(item)
+        max_items = 250
+        while self.notifications_list.count() > max_items:
+            self.notifications_list.takeItem(0)
+        if self.notifications_list.count() > 0:
+            self.notifications_list.scrollToBottom()
 
     def _append_notifications(self, source: str, text: str) -> None:
         if not hasattr(self, "notifications_list") or self.notifications_list is None:
@@ -3095,6 +3405,8 @@ class MainWindow(QtWidgets.QMainWindow):
             line = raw_line.strip()
             if not line:
                 continue
+            if line.startswith("[Recovery] "):
+                continue
             summary = self._notification_summary_for_line(source, line)
             if summary is not None:
                 messages.append(summary)
@@ -3118,8 +3430,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 job_name = inner.split(":", 1)[1].strip() if ":" in inner else inner
                 return (f"Started render: {job_name}", "info")
             return None
-        if line.startswith("[Recovery] "):
-            return (line[len("[Recovery] ") :].strip(), "warning")
         if line.startswith("[Queue] Stop requested"):
             return ("Stopping queue after the current step.", "warning")
         if line.startswith("[Queue] Terminating current render process"):
@@ -3207,6 +3517,32 @@ class MainWindow(QtWidgets.QMainWindow):
     def _clear_notifications_view_only(self) -> None:
         if hasattr(self, "notifications_list") and self.notifications_list is not None:
             self.notifications_list.clear()
+
+    def _build_diagnostics_snapshot(self) -> DiagnosticsSnapshot:
+        status_text = ""
+        if hasattr(self, "status_label") and self.status_label is not None:
+            status_text = str(self.status_label.text() or "")
+        return DiagnosticsSnapshot(
+            app_name=APP_NAME,
+            queue_path=str(self._current_queue_file_path()),
+            logs_dir=str(self.config.logs_dir),
+            hbatch_path=self._current_hbatch_path(),
+            player_path=self._current_player_path(),
+            queue_active=bool(self.queue_active),
+            queue_paused=bool(self.queue_paused),
+            current_job_id=str(self.current_job_id or ""),
+            render_worker_active=bool(self._render_job_active() or self.render_worker_client.is_busy()),
+            scan_worker_active=bool(self._scan_in_progress() or self.scan_worker_client.is_busy()),
+            render_worker_stderr=self.render_worker_client.last_stderr_text,
+            scan_worker_stderr=self.scan_worker_client.last_stderr_text,
+            status_text=status_text,
+            recovery_headline=str(self._last_recovery_headline or ""),
+        )
+
+    def _copy_diagnostics(self) -> None:
+        report = build_diagnostics_report(self._build_diagnostics_snapshot())
+        QtWidgets.QApplication.clipboard().setText(report)
+        self._set_status_message("Diagnostics copied.", 4000)
 
     def _on_queue_selection_changed(self) -> None:
         self.queue_table.viewport().update()
@@ -3369,8 +3705,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         toggle_actions: dict[QtGui.QAction, int] = {}
         for logical in range(self.queue_table.columnCount()):
-            hdr_item = self.queue_table.horizontalHeaderItem(logical)
-            label = hdr_item.text() if hdr_item is not None else f"Column {logical + 1}"
+            label = str(
+                self.queue_table.model().headerData(
+                    logical,
+                    QtCore.Qt.Orientation.Horizontal,
+                    QtCore.Qt.ItemDataRole.DisplayRole,
+                )
+                or f"Column {logical + 1}"
+            )
             act = menu.addAction(label)
             act.setCheckable(True)
             is_visible = not self.queue_table.isColumnHidden(logical)
@@ -3403,113 +3745,129 @@ class MainWindow(QtWidgets.QMainWindow):
         self._save_queue_state()
         self.queue_table.viewport().update()
 
-    def _on_queue_item_changed(self, item: QtWidgets.QTableWidgetItem) -> None:
-        if self._suppress_queue_item_changed:
-            return
-        if item is None:
-            return
+    def _queue_model_display_text(self, row: int, column: int) -> str:
+        model = getattr(self, "queue_table_model", None)
+        if model is None:
+            return ""
+        index = model.index(row, column)
+        if not index.isValid():
+            return ""
+        return str(index.data(QtCore.Qt.ItemDataRole.DisplayRole) or "").strip()
+
+    def _apply_queue_cell_edit(self, row: int, col: int, text: str, selected_rows_override: list[int] | None = None) -> bool:
         try:
-            row = item.row()
-            col = item.column()
             if col not in {0, 1, 2, 3, 4, 5}:
-                return
+                return False
             if not (0 <= row < len(self.jobs)):
-                return
+                return False
             job = self.jobs[row]
-            selected_rows = self._selected_rows()
+            if self._is_job_path_sync_locked(job):
+                safe_message(self, "Please Wait", "Wait for the current path update to finish.")
+                return False
+            inline_target_rows_fn = getattr(self.queue_table, "inline_edit_target_rows", None)
+            if selected_rows_override is not None:
+                selected_rows = list(selected_rows_override)
+            else:
+                selected_rows = list(inline_target_rows_fn()) if callable(inline_target_rows_fn) else self._selected_rows()
             if row not in selected_rows:
                 selected_rows = [row]
             target_rows = selected_rows
+            if any(self._is_job_path_sync_locked(self.jobs[r]) for r in target_rows if 0 <= r < len(self.jobs)):
+                safe_message(self, "Please Wait", "Wait for the current path update to finish.")
+                return False
             target_job_ids = [self.jobs[r].id for r in target_rows if 0 <= r < len(self.jobs)]
+            preserved_selection_ids = list(target_job_ids)
             before_states = self._job_states_for_ids(target_job_ids)
+
+            def _finish_update(
+                after_job_ids: list[str],
+                *,
+                undo_select_job_ids: list[str] | None = None,
+                redo_select_job_ids: list[str] | None = None,
+            ) -> bool:
+                refresh_ids = list(redo_select_job_ids or preserved_selection_ids or after_job_ids)
+                self._push_history_command(
+                    {
+                        "kind": "update_jobs",
+                        "before": before_states,
+                        "after": self._job_states_for_ids(after_job_ids),
+                        "undo_select_job_ids": list(undo_select_job_ids or preserved_selection_ids or target_job_ids),
+                        "redo_select_job_ids": refresh_ids,
+                    }
+                )
+                self.queue_table_model.refresh_jobs_by_id(after_job_ids)
+                self._defer_save_and_refresh_queue(refresh_ids)
+                return True
+
+            def _refresh_rejected() -> bool:
+                self._refresh_queue_preserve_selection()
+                return False
+
             if col == 5:
-                new_mode = FrameHandlingMode.from_label(item.text())
+                new_mode = FrameHandlingMode.from_label(text)
                 changed = False
                 for target_row in target_rows:
                     target = self.jobs[target_row]
                     if self._is_active_job(target):
                         continue
-                    if target.frame_handling_mode != new_mode:
-                        target.frame_handling_mode = new_mode
+                    if target.spec.frame_handling_mode != new_mode:
+                        target.spec.frame_handling_mode = new_mode
                         changed = True
                 if not changed:
-                    self._refresh_queue_preserve_selection()
-                    return
-                after_states = self._job_states_for_ids(target_job_ids)
-                self._push_history_command(
-                    {
-                        "kind": "update_jobs",
-                        "before": before_states,
-                        "after": after_states,
-                        "undo_select_job_ids": target_job_ids,
-                        "redo_select_job_ids": target_job_ids,
-                    }
-                )
-                self._save_and_refresh_queue(select_job_ids=target_job_ids)
-                return
+                    return True
+                return _finish_update(target_job_ids)
             if col == 0:
-                new_name = item.text().strip()
+                new_name = str(text or "").strip()
                 changed = False
                 for target_row in target_rows:
                     target = self.jobs[target_row]
                     if self._is_active_job(target):
                         continue
-                    target.name = new_name
-                    changed = True
+                    if target.spec.name != new_name:
+                        target.spec.name = new_name
+                        changed = True
                 if not changed:
-                    self._refresh_queue_preserve_selection()
-                    return
-                after_states = self._job_states_for_ids(target_job_ids)
-                self._push_history_command(
-                    {
-                        "kind": "update_jobs",
-                        "before": before_states,
-                        "after": after_states,
-                        "undo_select_job_ids": target_job_ids,
-                        "redo_select_job_ids": target_job_ids,
-                    }
-                )
-                self._save_and_refresh_queue(select_job_ids=target_job_ids)
-                return
+                    return True
+                return _finish_update(target_job_ids)
             if col in {1, 2}:
                 try:
-                    source_text = validate_queue_path_value_model(col, item.text())
+                    source_text = validate_queue_path_value_model(col, text)
                 except ValueError as exc:
                     safe_message(self, "Invalid Path", str(exc))
-                    self._refresh_queue_preserve_selection()
-                    return
+                    return _refresh_rejected()
                 old_hip = str(job.spec.hip_path or "").strip()
                 old_rop = str(job.spec.rop_path or "").strip()
+                if (col == 1 and source_text == old_hip) or (col == 2 and source_text == old_rop):
+                    return True
                 if col == 1:
-                    changed_ids = self._propagate_hip_path_change(old_hip, source_text)
+                    affected_before_ids = self._affected_job_ids_for_hip_path_change(old_hip)
                 else:
-                    changed_ids = self._propagate_rop_path_change(old_hip, old_rop, source_text)
+                    affected_before_ids = self._affected_job_ids_for_rop_path_change(old_hip, old_rop)
+                before_states = self._job_states_for_ids(affected_before_ids)
+                if col == 1:
+                    changed_ids = self._apply_hip_path_change_immediately(old_hip, source_text)
+                else:
+                    changed_ids = self._apply_rop_path_change_immediately(old_hip, old_rop, source_text)
                 if not changed_ids:
-                    self._refresh_queue_preserve_selection()
-                    return
-                after_states = self._job_states_for_ids(changed_ids)
-                self._push_history_command(
-                    {
-                        "kind": "update_jobs",
-                        "before": before_states,
-                        "after": after_states,
-                        "undo_select_job_ids": target_job_ids,
-                        "redo_select_job_ids": self._selection_ids_for_refresh(changed_ids) or [],
-                    }
+                    return _refresh_rejected()
+                selected_ids = preserved_selection_ids or self._selection_ids_for_refresh(changed_ids) or []
+                self._defer_finalize_path_change(
+                    changed_ids=changed_ids,
+                    before_states=before_states,
+                    undo_select_job_ids=affected_before_ids,
+                    redo_select_job_ids=selected_ids,
+                    status_text="Updating path...",
                 )
-                self._save_and_refresh_queue(select_job_ids=self._selection_ids_for_refresh(changed_ids))
-                return
+                return True
             # Frame Range / Step bulk-edit uses the edited row values as the source payload.
-            frame_item = self.queue_table.item(row, 3)
-            step_item = self.queue_table.item(row, 4)
-            frame_text = (frame_item.text() if frame_item is not None else "").strip()
-            step_text = (step_item.text() if step_item is not None else "").strip()
+            frame_text = str(text or "").strip() if col == 3 else self._queue_model_display_text(row, 3)
+            step_text = str(text or "").strip() if col == 4 else self._queue_model_display_text(row, 4)
             changed = False
             for target_row in target_rows:
                 target = self.jobs[target_row]
                 if self._is_active_job(target):
                     continue
-                if target.strict_frame_range:
+                if target.spec.strict_frame_range:
                     continue
                 try:
                     target_frame_text = frame_text if col == 3 else self._queue_edit_frame_text_for_job(target)
@@ -3518,68 +3876,28 @@ class MainWindow(QtWidgets.QMainWindow):
                     changed = True
                 except ValueError as exc:
                     safe_message(self, "Invalid Frame Override", str(exc))
-                    self._refresh_queue_preserve_selection()
-                    return
+                    return _refresh_rejected()
                 except Exception as exc:
                     safe_message(self, "Error", f"Failed to update frame override: {exc}", traceback.format_exc())
-                    self._refresh_queue_preserve_selection()
-                    return
+                    return _refresh_rejected()
             if not changed:
-                self._refresh_queue_preserve_selection()
-                return
-            self._push_history_command(
-                {
-                    "kind": "update_jobs",
-                    "before": before_states,
-                    "after": self._job_states_for_ids(target_job_ids),
-                    "undo_select_job_ids": target_job_ids,
-                    "redo_select_job_ids": target_job_ids,
-                }
-            )
-            self._save_and_refresh_queue(select_job_ids=target_job_ids)
+                return _refresh_rejected()
+            return _finish_update(target_job_ids)
         except Exception as exc:
             safe_message(self, "Queue Edit Error", f"Failed to apply queue edit: {exc}", traceback.format_exc())
             self._refresh_queue_preserve_selection()
+            return False
 
     def _on_queue_frame_handling_chosen(self, row: int, text: str) -> None:
         if not (0 <= row < len(self.jobs)):
             return
-        new_mode = FrameHandlingMode.from_label(text)
-        selected_rows_before = self._selected_rows()
-        selected_job_ids_before = [self.jobs[r].id for r in selected_rows_before if 0 <= r < len(self.jobs)]
-        if row in selected_rows_before:
-            target_rows = [r for r in selected_rows_before if 0 <= r < len(self.jobs)]
-            preserve_job_ids = [self.jobs[r].id for r in target_rows]
-        else:
-            target_rows = [row]
-            preserve_job_ids = selected_job_ids_before
-        target_job_ids = [self.jobs[r].id for r in target_rows]
-        before_states = self._job_states_for_ids(target_job_ids)
-        changed = False
-        for target_row in target_rows:
-            target = self.jobs[target_row]
-            if self._is_active_job(target):
-                continue
-            if target.spec.frame_handling_mode != new_mode:
-                target.spec.frame_handling_mode = new_mode
-                changed = True
-        if changed:
-            after_states = self._job_states_for_ids(target_job_ids)
-            self._push_history_command(
-                {
-                    "kind": "update_jobs",
-                    "before": before_states,
-                    "after": after_states,
-                    "undo_select_job_ids": preserve_job_ids or [],
-                    "redo_select_job_ids": preserve_job_ids or [],
-                }
-            )
-            self._save_and_refresh_queue(select_job_ids=preserve_job_ids or None)
-            return
-        self._save_and_refresh_queue(select_job_ids=preserve_job_ids or None)
+        consume_rows = getattr(self.queue_table, "consume_frame_handling_target_rows", None)
+        selected_rows = list(consume_rows()) if callable(consume_rows) else None
+        self._apply_queue_cell_edit(row, 5, text, selected_rows_override=selected_rows)
 
     def _handle_scan_requested(self, request: dict) -> None:
-        self.scan_coordinator.handle_scan_requested(request)
+        started = self.scan_coordinator.handle_scan_requested(request)
+        self._create_job_scan_in_progress = bool(started)
         self._refresh_ui_state()
 
     def _handle_scan_worker_message(self, message: dict[str, Any]) -> None:
@@ -3590,6 +3908,7 @@ class MainWindow(QtWidgets.QMainWindow):
         message_type = str(message.get("type", "") or "")
         if message_type == "scan.result":
             self._active_scan_request_id = ""
+            self._create_job_scan_in_progress = False
             records = list(payload.get("records", []) or [])
             renderable_records = [r for r in records if self._is_likely_renderable_scan_node(r)]
             selected_records = renderable_records or records
@@ -3612,6 +3931,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if message_type == "scan.failed":
             self._active_scan_request_id = ""
+            self._create_job_scan_in_progress = False
             message_text = str(payload.get("message", "") or "Scan failed.")
             details = str(payload.get("stderr", "") or self.scan_worker_client.last_stderr_text or "")
             safe_message(self, "Scan", message_text, details or None)
@@ -3664,6 +3984,16 @@ class MainWindow(QtWidgets.QMainWindow):
         return False
 
     def _start_queue(self) -> None:
+        selected = self._selected_job()
+        can_start_selected = self._is_job_runnable(selected)
+        has_runnable = any(self._is_job_runnable(job) for job in self.jobs)
+        start_decision = can_start_queue(
+            queue_active=self.queue_active,
+            queue_paused=self.queue_paused,
+            hbatch_exists=self._hbatch_exists(),
+            has_runnable=has_runnable,
+            can_start_selected=can_start_selected,
+        )
         if self.queue_active:
             if self.queue_paused:
                 self.queue_paused = False
@@ -3672,14 +4002,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._maybe_start_next_job()
                 self._refresh_ui_state()
             return
-        if not self._hbatch_exists():
-            safe_message(self, "hbatch Missing", "Configure a valid hbatch.exe path before starting the queue.")
-            return
-        selected = self._selected_job()
-        can_start_selected = self._is_job_runnable(selected)
-        has_runnable = any(self._is_job_runnable(job) for job in self.jobs)
-        if not has_runnable and not can_start_selected:
-            safe_message(self, "Queue Empty", "No enabled jobs to run.")
+        if not start_decision.allowed:
+            title = "hbatch Missing" if "hbatch" in start_decision.reason.lower() else "Queue Empty"
+            safe_message(self, title, start_decision.reason)
             return
         self.queue_active = True
         self.queue_paused = False
@@ -4081,13 +4406,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._start_job_process_continuation(job)
             return
         self._clear_job_resume_runtime_state(job)
-        job.chunk_start_frame_runtime = None
-        job.chunk_end_frame_runtime = None
-        job.chunk_step_runtime = None
-        job.chunk_ranges_runtime.clear()
-        job.chunk_index_runtime = 0
-        job.chunk_total_runtime = 0
-        job.chunk_attempt_runtime = 0
+        job.runtime.chunk_start_frame_runtime = None
+        job.runtime.chunk_end_frame_runtime = None
+        job.runtime.chunk_step_runtime = None
+        job.runtime.chunk_ranges_runtime.clear()
+        job.runtime.chunk_index_runtime = 0
+        job.runtime.chunk_total_runtime = 0
+        job.runtime.chunk_attempt_runtime = 0
         finished_job_id = job.id
         try:
             self._queue_next_search_index = self.jobs.index(job) + 1
@@ -4194,17 +4519,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _preview_job(self, job: RenderJob) -> None:
         preview_path = self._job_preview_path(job)
-        if preview_path is None:
-            safe_message(self, "Preview", "No previewable output path is available for this job.")
-            return
         player_path = self._current_player_path()
-        if not player_path:
-            safe_message(self, "Preview", "Configure a preview player path in Preferences first.")
+        player = Path(player_path) if player_path else Path()
+        preview_decision = validate_preview_launch(
+            preview_path_exists=preview_path is not None,
+            player_path_set=bool(player_path),
+            player_exists=bool(player_path and player.exists()),
+        )
+        if not preview_decision.allowed:
+            if preview_decision.message == "Preview player does not exist." and player_path:
+                safe_message(self, "Preview", f"Preview player does not exist:\n{player}")
+            else:
+                safe_message(self, preview_decision.title or "Preview", preview_decision.message)
             return
-        player = Path(player_path)
-        if not player.exists():
-            safe_message(self, "Preview", f"Preview player does not exist:\n{player}")
-            return
+        assert preview_path is not None
         try:
             started = QtCore.QProcess.startDetached(str(player), [str(preview_path)])
         except Exception as exc:
@@ -4218,24 +4546,31 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             folder.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
-            safe_message(self, "Logs Folder", f"Failed to create logs folder:\n{folder}", str(exc))
+            decision = validate_logs_folder_access(folder_ready=False, create_failed=True)
+            safe_message(self, decision.title or "Logs Folder", f"{decision.message}\n{folder}", str(exc))
             return
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(folder)))
 
     def _clear_log_files(self) -> None:
-        if self.current_job_log_handle is not None or self._render_job_active():
-            safe_message(self, "Logs Busy", "Cannot delete log files while a render is active.")
+        busy_decision = validate_log_file_deletion(
+            logs_busy=bool(self.current_job_log_handle is not None or self._render_job_active()),
+            has_logs=True,
+        )
+        if not busy_decision.valid and busy_decision.title == "Logs Busy":
+            safe_message(self, busy_decision.title, busy_decision.message)
             return
         logs_dir = self.config.logs_dir
         try:
             logs_dir.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
-            safe_message(self, "Logs Folder", f"Failed to access logs folder:\n{logs_dir}", str(exc))
+            decision = validate_logs_folder_access(folder_ready=False, create_failed=False)
+            safe_message(self, decision.title or "Logs Folder", f"{decision.message}\n{logs_dir}", str(exc))
             return
 
         log_paths = sorted(p for p in logs_dir.glob("*.log") if p.is_file())
-        if not log_paths:
-            safe_message(self, "Logs", "No log files found.")
+        has_logs_decision = validate_log_file_deletion(logs_busy=False, has_logs=bool(log_paths))
+        if not has_logs_decision.valid:
+            safe_message(self, has_logs_decision.title or "Logs", has_logs_decision.message)
             return
 
         answer = QtWidgets.QMessageBox.question(
@@ -4271,17 +4606,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if not job:
             return
         folder = self._output_folder_from_value(job.view.out_path) or Path(job.spec.hip_path).parent
-        if not folder.exists():
-            safe_message(self, "Folder Missing", f"Folder does not exist:\n{folder}")
+        decision = validate_output_folder_open(folder_exists=folder.exists())
+        if not decision.valid:
+            safe_message(self, decision.title or "Folder Missing", f"{decision.message}\n{folder}")
             return
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(folder)))
 
     def _refresh_ui_state(self) -> None:
         running = self.queue_active and self._render_job_active()
         scan_in_progress = self._scan_in_progress()
+        create_job_scan_in_progress = bool(self._create_job_scan_in_progress)
         hbatch_ok = self._hbatch_exists()
+        path_sync_in_progress = bool(self._path_sync_lock_counts)
 
-        self.add_job_panel.set_enabled_for_run_state(self.queue_active, scan_in_progress)
+        self.add_job_panel.set_enabled_for_run_state(self.queue_active, create_job_scan_in_progress)
         self.btn_preferences.setEnabled(not scan_in_progress)
 
         has_queued = any(self._is_job_runnable(j) for j in self.jobs)
@@ -4293,7 +4631,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_pause_queue.setEnabled(self.queue_active)
         self.btn_pause_queue.setText("Resume" if self.queue_paused else "Pause")
         self.btn_stop_queue.setEnabled(self.queue_active or self._render_job_active())
-        self.queue_file_menu_button.setEnabled(not scan_in_progress and not self._render_job_active())
+        self.queue_file_menu_button.setEnabled(not scan_in_progress and not self._render_job_active() and not path_sync_in_progress)
         self.chk_disable_husk_mplay.setEnabled(not self.queue_active and not self._render_job_active())
         self.chk_enable_chunking.setEnabled(not self.queue_active and not self._render_job_active())
         self.spin_chunk_size.setEnabled(
@@ -4309,8 +4647,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_status_message("Rendering...")
         elif self.queue_active and self.queue_paused:
             self._set_status_message("Queue paused")
-        elif scan_in_progress:
+        elif create_job_scan_in_progress:
             self._set_status_message("Scanning /out ...")
+        elif path_sync_in_progress:
+            self._set_status_message("Updating path...")
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if self._render_job_active():
@@ -4329,6 +4669,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._send_render_worker_request("render.kill", {}, request_id=self._active_render_request_id or uuid4().hex)
 
         self.scan_worker_client.shutdown()
+        self.background_scan_worker_client.shutdown()
         self.render_worker_client.shutdown()
 
         self._close_current_job_log()

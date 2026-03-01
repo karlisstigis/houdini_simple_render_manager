@@ -7,8 +7,13 @@ from action_policy import (
     can_edit_job,
     can_edit_job_column,
     can_open_queue_file,
+    can_open_output_folder,
+    can_preview_job,
+    can_reload_jobs_from_file,
     can_remove_jobs,
+    can_resume_job_from_output,
     can_scan_hip,
+    can_start_queue,
     is_job_runnable,
     queue_row_status_label,
 )
@@ -48,6 +53,32 @@ class ActionPolicyTests(unittest.TestCase):
     def test_can_open_queue_file_and_scan_hip(self) -> None:
         self.assertFalse(can_open_queue_file(queue_active=True, render_job_active=False, scan_in_progress=False).allowed)
         self.assertFalse(can_scan_hip(scan_in_progress=False, hbatch_exists=False).allowed)
+
+    def test_more_action_policies(self) -> None:
+        job = RenderJob("a.hip", "/out/a", "use_rop", status=JobStatus.CANCELED)
+        self.assertFalse(
+            can_reload_jobs_from_file(target_jobs=[job], is_active_job_fn=lambda _job: True, hbatch_exists=True).allowed
+        )
+        self.assertTrue(
+            can_start_queue(
+                queue_active=False,
+                queue_paused=False,
+                hbatch_exists=True,
+                has_runnable=True,
+                can_start_selected=False,
+            ).allowed
+        )
+        self.assertFalse(
+            can_resume_job_from_output(
+                job,
+                render_job_active=False,
+                queue_active=False,
+                hip_exists=False,
+                hbatch_exists=True,
+            ).allowed
+        )
+        self.assertFalse(can_preview_job(preview_path_exists=True, player_path_set=True, player_exists=False).allowed)
+        self.assertFalse(can_open_output_folder(folder_exists=False).allowed)
 
     def test_queue_row_status_label(self) -> None:
         job = RenderJob("a.hip", "/out/a", "use_rop")

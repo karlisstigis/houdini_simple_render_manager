@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from queue_editing import apply_queue_path_text
 from queue_models import RenderJob
@@ -60,6 +60,80 @@ def sync_job_after_path_change(
         mark_job_offline(job, f"Failed to refresh ROP metadata: {exc}")
 
 
+def apply_hip_path_change(
+    jobs: list[RenderJob],
+    *,
+    old_hip: str,
+    new_hip: str,
+    running_status: Any,
+) -> list[RenderJob]:
+    old_key = str(old_hip or "").strip()
+    new_key = str(new_hip or "").strip()
+    if old_key == new_key:
+        return []
+    changed_jobs: list[RenderJob] = []
+    for job in jobs:
+        if job.runtime.status == running_status:
+            continue
+        if str(job.spec.hip_path or "").strip() != old_key:
+            continue
+        try:
+            apply_queue_path_text(job, 1, new_key)
+        except ValueError:
+            continue
+        changed_jobs.append(job)
+    return changed_jobs
+
+
+def apply_rop_path_change(
+    jobs: list[RenderJob],
+    *,
+    hip_path: str,
+    old_rop: str,
+    new_rop: str,
+    running_status: Any,
+) -> list[RenderJob]:
+    hip_key = str(hip_path or "").strip()
+    old_key = str(old_rop or "").strip()
+    new_key = str(new_rop or "").strip()
+    if old_key == new_key:
+        return []
+    changed_jobs: list[RenderJob] = []
+    for job in jobs:
+        if job.runtime.status == running_status:
+            continue
+        if str(job.spec.hip_path or "").strip() != hip_key:
+            continue
+        if str(job.spec.rop_path or "").strip() != old_key:
+            continue
+        try:
+            apply_queue_path_text(job, 2, new_key)
+        except ValueError:
+            continue
+        changed_jobs.append(job)
+    return changed_jobs
+
+
+def sync_jobs_after_path_change(
+    jobs: list[RenderJob],
+    *,
+    probe_rop_info: Callable[[str, str], RopInfo | None],
+    mark_job_offline: Callable[[RenderJob, str | None], None],
+    restore_job_online_status: Callable[[RenderJob], None],
+    normalize_output_display_path: Callable[[str], str],
+) -> None:
+    probe_cache: dict[tuple[str, str], RopInfo | None] = {}
+    for job in jobs:
+        sync_job_after_path_change(
+            job,
+            probe_cache=probe_cache,
+            probe_rop_info=probe_rop_info,
+            mark_job_offline=mark_job_offline,
+            restore_job_online_status=restore_job_online_status,
+            normalize_output_display_path=normalize_output_display_path,
+        )
+
+
 def propagate_hip_path_change(
     jobs: list[RenderJob],
     *,
@@ -71,29 +145,20 @@ def propagate_hip_path_change(
     restore_job_online_status: Callable[[RenderJob], None],
     normalize_output_display_path: Callable[[str], str],
 ) -> list[str]:
-    old_key = str(old_hip or "").strip()
-    new_key = str(new_hip or "").strip()
-    probe_cache: dict[tuple[str, str], RopInfo | None] = {}
-    changed_ids: list[str] = []
-    for job in jobs:
-        if job.runtime.status == running_status:
-            continue
-        if str(job.spec.hip_path or "").strip() != old_key:
-            continue
-        try:
-            apply_queue_path_text(job, 1, new_key)
-        except ValueError:
-            continue
-        sync_job_after_path_change(
-            job,
-            probe_cache=probe_cache,
-            probe_rop_info=probe_rop_info,
-            mark_job_offline=mark_job_offline,
-            restore_job_online_status=restore_job_online_status,
-            normalize_output_display_path=normalize_output_display_path,
-        )
-        changed_ids.append(job.id)
-    return changed_ids
+    changed_jobs = apply_hip_path_change(
+        jobs,
+        old_hip=old_hip,
+        new_hip=new_hip,
+        running_status=running_status,
+    )
+    sync_jobs_after_path_change(
+        changed_jobs,
+        probe_rop_info=probe_rop_info,
+        mark_job_offline=mark_job_offline,
+        restore_job_online_status=restore_job_online_status,
+        normalize_output_display_path=normalize_output_display_path,
+    )
+    return [job.id for job in changed_jobs]
 
 
 def propagate_rop_path_change(
@@ -108,32 +173,21 @@ def propagate_rop_path_change(
     restore_job_online_status: Callable[[RenderJob], None],
     normalize_output_display_path: Callable[[str], str],
 ) -> list[str]:
-    hip_key = str(hip_path or "").strip()
-    old_key = str(old_rop or "").strip()
-    new_key = str(new_rop or "").strip()
-    probe_cache: dict[tuple[str, str], RopInfo | None] = {}
-    changed_ids: list[str] = []
-    for job in jobs:
-        if job.runtime.status == running_status:
-            continue
-        if str(job.spec.hip_path or "").strip() != hip_key:
-            continue
-        if str(job.spec.rop_path or "").strip() != old_key:
-            continue
-        try:
-            apply_queue_path_text(job, 2, new_key)
-        except ValueError:
-            continue
-        sync_job_after_path_change(
-            job,
-            probe_cache=probe_cache,
-            probe_rop_info=probe_rop_info,
-            mark_job_offline=mark_job_offline,
-            restore_job_online_status=restore_job_online_status,
-            normalize_output_display_path=normalize_output_display_path,
-        )
-        changed_ids.append(job.id)
-    return changed_ids
+    changed_jobs = apply_rop_path_change(
+        jobs,
+        hip_path=hip_path,
+        old_rop=old_rop,
+        new_rop=new_rop,
+        running_status=running_status,
+    )
+    sync_jobs_after_path_change(
+        changed_jobs,
+        probe_rop_info=probe_rop_info,
+        mark_job_offline=mark_job_offline,
+        restore_job_online_status=restore_job_online_status,
+        normalize_output_display_path=normalize_output_display_path,
+    )
+    return [job.id for job in changed_jobs]
 
 
 def refresh_jobs_from_rop_metadata(

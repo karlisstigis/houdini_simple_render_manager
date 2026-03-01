@@ -41,12 +41,9 @@ def build_queue_tree_panel(
     queue_tree.setAlternatingRowColors(True)
     queue_tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
     queue_tree.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-    queue_tree.setEditTriggers(
-        QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
-        | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
-    )
+    queue_tree.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
     queue_tree.setModel(queue_tree_model)
-    queue_tree.setItemDelegate(QueueTreeItemDelegate(queue_tree))
+    queue_tree.setItemDelegate(QueueTreeItemDelegate())
     queue_tree.setRootIsDecorated(True)
     queue_tree.setItemsExpandable(True)
     queue_tree.setExpandsOnDoubleClick(False)
@@ -66,6 +63,8 @@ def refresh_queue_tree_model(
     tree: QueueTreeView | None,
     model: QtGui.QStandardItemModel | None,
     jobs: list[Any],
+    *,
+    is_locked_job_fn=None,
 ) -> None:
     if tree is None or model is None:
         return
@@ -74,18 +73,26 @@ def refresh_queue_tree_model(
         model.clear()
         model.setHorizontalHeaderLabels(["Tree"])
         grouped: dict[str, set[str]] = {}
+        locked_hips: set[str] = set()
+        locked_rops: set[tuple[str, str]] = set()
         for job in jobs:
-            hip = str(getattr(job, "hip_path", "") or "").strip()
-            rop = str(getattr(job, "rop_path", "") or "").strip()
+            spec = getattr(job, "spec", None)
+            hip = str((spec.hip_path if spec is not None else getattr(job, "hip_path", "")) or "").strip()
+            rop = str((spec.rop_path if spec is not None else getattr(job, "rop_path", "")) or "").strip()
             if not hip:
                 continue
             rop_set = grouped.setdefault(hip, set())
             if rop:
                 rop_set.add(rop)
+            if callable(is_locked_job_fn) and is_locked_job_fn(job):
+                locked_hips.add(hip)
+                if rop:
+                    locked_rops.add((hip, rop))
 
         for hip_path in sorted(grouped.keys(), key=lambda s: s.lower()):
             parent = QtGui.QStandardItem(hip_path)
-            parent.setEditable(True)
+            hip_locked = hip_path in locked_hips
+            parent.setEditable(not hip_locked)
             parent.setToolTip(hip_path)
             parent.setData("hip", TREE_KIND_ROLE)
             parent.setData(hip_path, TREE_HIP_ROLE)
@@ -93,7 +100,8 @@ def refresh_queue_tree_model(
             model.appendRow(parent)
             for rop_path in sorted(grouped[hip_path], key=lambda s: s.lower()):
                 child = QtGui.QStandardItem(rop_path)
-                child.setEditable(True)
+                child_locked = hip_locked or ((hip_path, rop_path) in locked_rops)
+                child.setEditable(not child_locked)
                 child.setToolTip(rop_path)
                 child.setData("rop", TREE_KIND_ROLE)
                 child.setData(hip_path, TREE_HIP_ROLE)

@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from queue_table_model import PATH_SYNC_LOCKED_ROLE
 from theme_support import DEFAULT_THEME
 
 
@@ -58,6 +59,43 @@ class CleanStepSpinBox(QtWidgets.QSpinBox):
         if line is not None:
             line.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
             line.selectAll()
+
+
+class SafeCommitLineEdit(QtWidgets.QLineEdit):
+    commit_requested = QtCore.Signal(str)
+    cancel_requested = QtCore.Signal()
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._commit_emitted = False
+        self._commit_via_enter = False
+
+    def focusOutEvent(self, event: QtGui.QFocusEvent) -> None:
+        super().focusOutEvent(event)
+        self._emit_commit_once()
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.key() in {QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter}:
+            self._commit_via_enter = True
+            self._emit_commit_once()
+            event.accept()
+            return
+        if event.key() == QtCore.Qt.Key.Key_Escape:
+            if not self._commit_emitted:
+                self._commit_emitted = True
+                self.cancel_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _emit_commit_once(self) -> None:
+        if self._commit_emitted:
+            return
+        self._commit_emitted = True
+        self.commit_requested.emit(self.text())
+
+    def committed_via_enter(self) -> bool:
+        return self._commit_via_enter
 
 
 class PanelFrame(QtWidgets.QFrame):
@@ -969,7 +1007,7 @@ class AddJobPanel(QtWidgets.QGroupBox):
         combo.blockSignals(False)
 
 
-class QueueTableWidget(QtWidgets.QTableWidget):
+class QueueTableView(QtWidgets.QTableView):
     FRAME_HANDLING_COLUMN = 5
     FRAME_HANDLING_OPTIONS = [
         "Render Missing",
@@ -997,7 +1035,12 @@ class QueueTableWidget(QtWidgets.QTableWidget):
         self._pending_preserved_drag_rows: list[int] = []
         self._pending_preserved_drag_pos: QtCore.QPoint | None = None
         self._drop_indicator_row: int | None = None
-        self.viewport().installEventFilter(self)
+        self._inline_editor: SafeCommitLineEdit | None = None
+        self._inline_edit_index = QtCore.QPersistentModelIndex()
+        self._inline_edit_selected_rows: list[int] = []
+        self._frame_handling_target_rows: list[int] = []
+        self._suppress_frame_handling_popup_once = False
+        self._suppress_enter_retrigger_once = False
 
     def clear_frame_handling_interaction_state(self) -> None:
         self._suppress_drag_select_until_release = False
@@ -1044,22 +1087,6 @@ class QueueTableWidget(QtWidgets.QTableWidget):
         col = self._first_visible_column()
         return self.visualRect(self.model().index(row, col))
 
-    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
-        if watched is self.viewport():
-            et = event.type()
-            if et in {
-                QtCore.QEvent.Type.DragEnter,
-                QtCore.QEvent.Type.DragMove,
-                QtCore.QEvent.Type.Drop,
-            } and hasattr(event, "position"):
-                try:
-                    self._set_drop_indicator_from_pos(event.position().toPoint())
-                except Exception:
-                    pass
-            elif et == QtCore.QEvent.Type.DragLeave:
-                self._clear_drop_indicator()
-        return super().eventFilter(watched, event)
-
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
         super().paintEvent(event)
         # Draw the stats split divider at all times.
@@ -1102,6 +1129,195 @@ class QueueTableWidget(QtWidgets.QTableWidget):
         sm = self._selection_model()
         return len(sm.selectedRows()) if sm is not None else 0
 
+    def currentRow(self) -> int:
+        idx = self.currentIndex()
+        return idx.row() if idx.isValid() else -1
+
+    def rowCount(self) -> int:
+        model = self.model()
+        return int(model.rowCount()) if model is not None else 0
+
+    def columnCount(self) -> int:
+        model = self.model()
+        return int(model.columnCount()) if model is not None else 0
+
+    def setCurrentCell(self, row: int, column: int) -> None:
+        model = self.model()
+        if model is None or row < 0 or column < 0:
+            self.setCurrentIndex(QtCore.QModelIndex())
+            return
+        self.setCurrentIndex(model.index(row, column))
+
+    def _supports_inline_text_edit(self, index: QtCore.QModelIndex) -> bool:
+        if not index.isValid() or index.column() == self.FRAME_HANDLING_COLUMN:
+            return False
+        model = self.model()
+        return bool(model is not None and (model.flags(index) & QtCore.Qt.ItemFlag.ItemIsEditable))
+
+    def _inline_editor_rect(self, index: QtCore.QModelIndex) -> QtCore.QRect:
+        rect = self.visualRect(index)
+        return rect.adjusted(1, 1, -1, -1)
+
+    def _update_inline_editor_geometry(self) -> None:
+        if self._inline_editor is None or not self._inline_edit_index.isValid():
+            return
+        rect = self._inline_editor_rect(QtCore.QModelIndex(self._inline_edit_index))
+        if not rect.isValid() or rect.width() <= 0 or rect.height() <= 0:
+            self._cancel_inline_edit()
+            return
+        self._inline_editor.setGeometry(rect)
+
+    def _start_inline_edit(self, index: QtCore.QModelIndex) -> bool:
+        if not self._supports_inline_text_edit(index):
+            return False
+        if self._inline_edit_index.isValid() and QtCore.QModelIndex(self._inline_edit_index) == index and self._inline_editor is not None:
+            self._inline_editor.setFocus()
+            self._inline_editor.selectAll()
+            return True
+        self._cancel_inline_edit()
+        sm = self._selection_model()
+        rows = sorted({idx.row() for idx in sm.selectedRows() if idx.isValid()}) if sm is not None else []
+        self._inline_edit_selected_rows = rows or [index.row()]
+        self._inline_edit_index = QtCore.QPersistentModelIndex(index)
+        editor = SafeCommitLineEdit(self.viewport())
+        editor.setText(str(index.data(QtCore.Qt.ItemDataRole.EditRole) or index.data(QtCore.Qt.ItemDataRole.DisplayRole) or ""))
+        editor.commit_requested.connect(self._commit_inline_edit)
+        editor.cancel_requested.connect(self._cancel_inline_edit)
+        self._inline_editor = editor
+        self._update_inline_editor_geometry()
+        editor.show()
+        editor.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+        editor.selectAll()
+        return True
+
+    @staticmethod
+    def _should_start_inline_edit(
+        trigger: QtWidgets.QAbstractItemView.EditTrigger,
+        event: QtCore.QEvent | None,
+    ) -> bool:
+        if trigger in {
+            QtWidgets.QAbstractItemView.EditTrigger.CurrentChanged,
+            QtWidgets.QAbstractItemView.EditTrigger.SelectedClicked,
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers,
+        }:
+            return False
+        if trigger in {
+            QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked,
+            QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed,
+            QtWidgets.QAbstractItemView.EditTrigger.AnyKeyPressed,
+        }:
+            return True
+        if trigger == QtWidgets.QAbstractItemView.EditTrigger.AllEditTriggers:
+            return isinstance(event, (QtGui.QMouseEvent, QtGui.QKeyEvent))
+        return False
+
+    def _commit_inline_edit(self, text: str) -> None:
+        editor = self._inline_editor
+        index = QtCore.QModelIndex(self._inline_edit_index)
+        self._inline_editor = None
+        self._inline_edit_index = QtCore.QPersistentModelIndex()
+        if isinstance(editor, SafeCommitLineEdit) and editor.committed_via_enter():
+            self._suppress_enter_retrigger_once = True
+        if QtWidgets.QApplication.mouseButtons() != QtCore.Qt.MouseButton.NoButton:
+            self._suppress_frame_handling_popup_once = True
+        if editor is not None:
+            editor.hide()
+            editor.deleteLater()
+        model = self.model()
+        if model is None or not index.isValid():
+            self._inline_edit_selected_rows = []
+            return
+        model.setData(index, text, QtCore.Qt.ItemDataRole.EditRole)
+        self._restore_inline_edit_selection(index.row())
+        self._inline_edit_selected_rows = []
+
+    def _cancel_inline_edit(self) -> None:
+        editor = self._inline_editor
+        self._inline_editor = None
+        self._inline_edit_index = QtCore.QPersistentModelIndex()
+        self._inline_edit_selected_rows = []
+        if editor is not None:
+            editor.hide()
+            editor.deleteLater()
+
+    def inline_edit_target_rows(self) -> list[int]:
+        return list(self._inline_edit_selected_rows)
+
+    def consume_frame_handling_target_rows(self) -> list[int]:
+        rows = list(self._frame_handling_target_rows)
+        self._frame_handling_target_rows = []
+        return rows
+
+    def _clear_frame_handling_popup_suppression(self) -> None:
+        self._suppress_frame_handling_popup_once = False
+
+    def _restore_inline_edit_selection(self, current_row: int) -> None:
+        rows = [row for row in self._inline_edit_selected_rows if 0 <= row < self.rowCount()]
+        if not rows:
+            return
+        sm = self._selection_model()
+        model = self.model()
+        if sm is None or model is None:
+            return
+        blocker = QtCore.QSignalBlocker(sm)
+        try:
+            sm.clearSelection()
+            for row in rows:
+                idx = model.index(row, 0)
+                sm.select(
+                    idx,
+                    QtCore.QItemSelectionModel.SelectionFlag.Select
+                    | QtCore.QItemSelectionModel.SelectionFlag.Rows,
+                )
+            current_target = current_row if current_row in rows else rows[0]
+            sm.setCurrentIndex(model.index(current_target, 0), QtCore.QItemSelectionModel.SelectionFlag.NoUpdate)
+        finally:
+            del blocker
+
+    def edit(
+        self,
+        index: QtCore.QModelIndex,
+        trigger: QtWidgets.QAbstractItemView.EditTrigger = QtWidgets.QAbstractItemView.EditTrigger.AllEditTriggers,
+        event: QtCore.QEvent | None = None,
+    ) -> bool:
+        if (
+            index.isValid()
+            and index.column() == self.FRAME_HANDLING_COLUMN
+            and self._should_start_inline_edit(trigger, event)
+        ):
+            self._show_frame_handling_popup(index)
+            return True
+        if self._should_start_inline_edit(trigger, event) and self._start_inline_edit(index):
+            return True
+        return False
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if self._suppress_enter_retrigger_once and event.key() in {QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter}:
+            self._suppress_enter_retrigger_once = False
+            event.accept()
+            return
+        idx = self.currentIndex()
+        if idx.isValid():
+            if event.key() in {QtCore.Qt.Key.Key_F2, QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter}:
+                if idx.column() == self.FRAME_HANDLING_COLUMN:
+                    self._show_frame_handling_popup(idx)
+                else:
+                    self._start_inline_edit(idx)
+                event.accept()
+                return
+            if (
+                not event.text().isspace()
+                and event.text()
+                and event.modifiers() in {QtCore.Qt.KeyboardModifier.NoModifier, QtCore.Qt.KeyboardModifier.ShiftModifier}
+                and self._supports_inline_text_edit(idx)
+            ):
+                if self._start_inline_edit(idx) and self._inline_editor is not None:
+                    self._inline_editor.setText(event.text())
+                    self._inline_editor.setCursorPosition(len(event.text()))
+                    event.accept()
+                    return
+        super().keyPressEvent(event)
+
     def _is_row_selected(self, row: int) -> bool:
         sm = self._selection_model()
         return bool(sm is not None and sm.isRowSelected(row, QtCore.QModelIndex()))
@@ -1117,7 +1333,19 @@ class QueueTableWidget(QtWidgets.QTableWidget):
             self._pending_preserved_drag_rows = []
             self._pending_preserved_drag_pos = None
             pos = event.position().toPoint()
+            if self._inline_editor is not None:
+                editor = self._inline_editor
+                if editor is not None and not editor.geometry().contains(pos):
+                    self._suppress_frame_handling_popup_once = True
+                    editor.clearFocus()
+                    event.accept()
+                    return
             idx = self.indexAt(pos)
+            if self._suppress_frame_handling_popup_once:
+                self._suppress_frame_handling_popup_once = False
+                if idx.isValid() and idx.column() == self.FRAME_HANDLING_COLUMN:
+                    event.accept()
+                    return
             if not idx.isValid():
                 self.clearSelection()
                 self.setCurrentCell(-1, -1)
@@ -1142,6 +1370,11 @@ class QueueTableWidget(QtWidgets.QTableWidget):
     def _show_frame_handling_popup(self, idx: QtCore.QModelIndex) -> None:
         if not idx.isValid() or idx.column() != self.FRAME_HANDLING_COLUMN:
             return
+        sm = self._selection_model()
+        selected_rows = sorted({row.row() for row in sm.selectedRows() if row.isValid()}) if sm is not None else []
+        if idx.row() not in selected_rows:
+            selected_rows = [idx.row()]
+        self._frame_handling_target_rows = selected_rows
         current_text = str(idx.data(QtCore.Qt.ItemDataRole.DisplayRole) or "").strip()
         menu = QtWidgets.QMenu(self)
         menu.setObjectName("frameHandlingMenu")
@@ -1156,6 +1389,8 @@ class QueueTableWidget(QtWidgets.QTableWidget):
         chosen = menu.exec(self.viewport().mapToGlobal(rect.bottomLeft()))
         if chosen is not None:
             self.frame_handling_chosen.emit(idx.row(), chosen.text())
+        else:
+            self._frame_handling_target_rows = []
         self.clear_frame_handling_interaction_state()
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
@@ -1191,10 +1426,27 @@ class QueueTableWidget(QtWidgets.QTableWidget):
                 self._pending_preserved_drag_rows = []
                 self._pending_preserved_drag_pos = None
 
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_inline_editor_geometry()
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:
+        super().scrollContentsBy(dx, dy)
+        self._update_inline_editor_geometry()
+
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
             idx = self.indexAt(event.position().toPoint())
             if idx.isValid():
+                if idx.column() == self.FRAME_HANDLING_COLUMN:
+                    self._show_frame_handling_popup(idx)
+                    event.accept()
+                    return
+                if self._supports_inline_text_edit(idx):
+                    self._set_current_no_update(idx)
+                    self._start_inline_edit(idx)
+                    event.accept()
+                    return
                 mods = QtWidgets.QApplication.keyboardModifiers()
                 if (
                     mods == QtCore.Qt.KeyboardModifier.NoModifier
@@ -1202,8 +1454,8 @@ class QueueTableWidget(QtWidgets.QTableWidget):
                     and self._selected_row_count() > 1
                 ):
                     self._set_current_no_update(idx)
-                    item = self.item(idx.row(), idx.column())
-                    if item is not None and bool(item.flags() & QtCore.Qt.ItemFlag.ItemIsEditable):
+                    model = self.model()
+                    if model is not None and bool(model.flags(idx) & QtCore.Qt.ItemFlag.ItemIsEditable):
                         self.edit(idx)
                     event.accept()
                     return
@@ -1226,8 +1478,8 @@ class QueueTableWidget(QtWidgets.QTableWidget):
         count = len(rows) if rows else (1 if self.currentRow() >= 0 else 0)
         if count > 0:
             if count == 1 and rows:
-                name_item = self.item(rows[0], 0)
-                label = (name_item.text().strip() if name_item else "") or "Move job"
+                name_idx = self.model().index(rows[0], 0) if self.model() is not None else QtCore.QModelIndex()
+                label = (str(name_idx.data(QtCore.Qt.ItemDataRole.DisplayRole) or "").strip()) or "Move job"
             elif count == 1:
                 label = "Move job"
             else:
@@ -1324,6 +1576,9 @@ class QueueTreeView(QtWidgets.QTreeView):
         self.selection_row_color = QtGui.QColor(DEFAULT_THEME["selection_row"])
         self.selection_row_alt_color = QtGui.QColor(DEFAULT_THEME["selection_row_alt"])
         self.selection_overlay_opacity = int(DEFAULT_THEME.get("selection_overlay_opacity", 95))
+        self._inline_editor: SafeCommitLineEdit | None = None
+        self._inline_edit_index = QtCore.QPersistentModelIndex()
+        self._suppress_enter_retrigger_once = False
 
     def _row_fill_and_overlay(self, index: QtCore.QModelIndex) -> tuple[QtGui.QColor, QtGui.QColor | None]:
         alt = bool(index.row() % 2)
@@ -1385,45 +1640,147 @@ class QueueTreeView(QtWidgets.QTreeView):
         painter.restore()
         super().drawBranches(painter, rect, index)
 
+    def _supports_inline_text_edit(self, index: QtCore.QModelIndex) -> bool:
+        if not index.isValid():
+            return False
+        model = self.model()
+        return bool(model is not None and (model.flags(index) & QtCore.Qt.ItemFlag.ItemIsEditable))
+
+    def _inline_editor_rect(self, index: QtCore.QModelIndex) -> QtCore.QRect:
+        rect = self.visualRect(index)
+        left = rect.left()
+        width = max(80, self.viewport().width() - left - 8)
+        return QtCore.QRect(left, rect.top(), width, rect.height()).adjusted(1, 1, -1, -1)
+
+    def _update_inline_editor_geometry(self) -> None:
+        if self._inline_editor is None or not self._inline_edit_index.isValid():
+            return
+        rect = self._inline_editor_rect(QtCore.QModelIndex(self._inline_edit_index))
+        if not rect.isValid() or rect.width() <= 0 or rect.height() <= 0:
+            self._cancel_inline_edit()
+            return
+        self._inline_editor.setGeometry(rect)
+
+    def _start_inline_edit(self, index: QtCore.QModelIndex) -> bool:
+        if not self._supports_inline_text_edit(index):
+            return False
+        if self._inline_edit_index.isValid() and QtCore.QModelIndex(self._inline_edit_index) == index and self._inline_editor is not None:
+            self._inline_editor.setFocus()
+            self._inline_editor.selectAll()
+            return True
+        self._cancel_inline_edit()
+        self._inline_edit_index = QtCore.QPersistentModelIndex(index)
+        editor = SafeCommitLineEdit(self.viewport())
+        editor.setText(str(index.data(QtCore.Qt.ItemDataRole.EditRole) or index.data(QtCore.Qt.ItemDataRole.DisplayRole) or ""))
+        editor.commit_requested.connect(self._commit_inline_edit)
+        editor.cancel_requested.connect(self._cancel_inline_edit)
+        self._inline_editor = editor
+        self._update_inline_editor_geometry()
+        editor.show()
+        editor.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+        editor.selectAll()
+        return True
+
+    @staticmethod
+    def _should_start_inline_edit(
+        trigger: QtWidgets.QAbstractItemView.EditTrigger,
+        event: QtCore.QEvent | None,
+    ) -> bool:
+        if trigger in {
+            QtWidgets.QAbstractItemView.EditTrigger.CurrentChanged,
+            QtWidgets.QAbstractItemView.EditTrigger.SelectedClicked,
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers,
+        }:
+            return False
+        if trigger in {
+            QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked,
+            QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed,
+            QtWidgets.QAbstractItemView.EditTrigger.AnyKeyPressed,
+        }:
+            return True
+        if trigger == QtWidgets.QAbstractItemView.EditTrigger.AllEditTriggers:
+            return isinstance(event, (QtGui.QMouseEvent, QtGui.QKeyEvent))
+        return False
+
+    def _commit_inline_edit(self, text: str) -> None:
+        editor = self._inline_editor
+        index = QtCore.QModelIndex(self._inline_edit_index)
+        self._inline_editor = None
+        self._inline_edit_index = QtCore.QPersistentModelIndex()
+        if isinstance(editor, SafeCommitLineEdit) and editor.committed_via_enter():
+            self._suppress_enter_retrigger_once = True
+        if editor is not None:
+            editor.hide()
+            editor.deleteLater()
+        model = self.model()
+        if model is None or not index.isValid():
+            return
+        model.setData(index, text, QtCore.Qt.ItemDataRole.EditRole)
+
+    def _cancel_inline_edit(self) -> None:
+        editor = self._inline_editor
+        self._inline_editor = None
+        self._inline_edit_index = QtCore.QPersistentModelIndex()
+        if editor is not None:
+            editor.hide()
+            editor.deleteLater()
+
+    def edit(
+        self,
+        index: QtCore.QModelIndex,
+        trigger: QtWidgets.QAbstractItemView.EditTrigger = QtWidgets.QAbstractItemView.EditTrigger.AllEditTriggers,
+        event: QtCore.QEvent | None = None,
+    ) -> bool:
+        if self._should_start_inline_edit(trigger, event) and self._start_inline_edit(index):
+            return True
+        return False
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if self._suppress_enter_retrigger_once and event.key() in {QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter}:
+            self._suppress_enter_retrigger_once = False
+            event.accept()
+            return
+        idx = self.currentIndex()
+        if idx.isValid():
+            if event.key() in {QtCore.Qt.Key.Key_F2, QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter}:
+                if self._supports_inline_text_edit(idx):
+                    self._start_inline_edit(idx)
+                event.accept()
+                return
+            if (
+                not event.text().isspace()
+                and event.text()
+                and event.modifiers() in {QtCore.Qt.KeyboardModifier.NoModifier, QtCore.Qt.KeyboardModifier.ShiftModifier}
+                and self._supports_inline_text_edit(idx)
+            ):
+                if self._start_inline_edit(idx) and self._inline_editor is not None:
+                    self._inline_editor.setText(event.text())
+                    self._inline_editor.setCursorPosition(len(event.text()))
+                    event.accept()
+                    return
+        super().keyPressEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            idx = self.indexAt(event.position().toPoint())
+            if idx.isValid() and self._supports_inline_text_edit(idx):
+                self.setCurrentIndex(idx)
+                self._start_inline_edit(idx)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_inline_editor_geometry()
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:
+        super().scrollContentsBy(dx, dy)
+        self._update_inline_editor_geometry()
 
 class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
     STATUS_ROLE = QtCore.Qt.ItemDataRole.UserRole + 20
     _offline_stripe_brush: QtGui.QBrush | None = None
-
-    def createEditor(
-        self,
-        parent: QtWidgets.QWidget,
-        option: QtWidgets.QStyleOptionViewItem,
-        index: QtCore.QModelIndex,
-    ) -> QtWidgets.QWidget | None:
-        if index.column() == QueueTableWidget.FRAME_HANDLING_COLUMN:
-            return None
-        return super().createEditor(parent, option, index)
-
-    def setEditorData(self, editor: QtWidgets.QWidget, index: QtCore.QModelIndex) -> None:
-        if index.column() == QueueTableWidget.FRAME_HANDLING_COLUMN:
-            return
-        super().setEditorData(editor, index)
-
-    def setModelData(
-        self,
-        editor: QtWidgets.QWidget,
-        model: QtCore.QAbstractItemModel,
-        index: QtCore.QModelIndex,
-    ) -> None:
-        if index.column() == QueueTableWidget.FRAME_HANDLING_COLUMN:
-            return
-        super().setModelData(editor, model, index)
-
-    def updateEditorGeometry(
-        self,
-        editor: QtWidgets.QWidget,
-        option: QtWidgets.QStyleOptionViewItem,
-        index: QtCore.QModelIndex,
-    ) -> None:
-        if index.column() == QueueTableWidget.FRAME_HANDLING_COLUMN:
-            return
-        super().updateEditorGeometry(editor, option, index)
 
     @staticmethod
     def _selection_overlay_color(widget: QtWidgets.QWidget | None, row: int) -> QtGui.QColor | None:
@@ -1504,6 +1861,56 @@ class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
         painter.fillRect(rect, QueueTableItemDelegate._offline_stripe_texture_brush())
         painter.restore()
 
+    @staticmethod
+    def _paint_path_sync_overlay(
+        painter: QtGui.QPainter,
+        rect: QtCore.QRect,
+        widget: QtWidgets.QWidget | None,
+        *,
+        locked: bool,
+    ) -> None:
+        if not locked or not rect.isValid() or rect.height() <= 0:
+            return
+        progress = 0.0
+        if widget is not None:
+            try:
+                progress = float(widget.property("pathSyncOverlayProgress") or 0.0)
+            except Exception:
+                progress = 0.0
+        progress = max(0.0, min(1.0, progress))
+        band_height = max(10, int(rect.height() * 0.9))
+        travel = rect.height() + band_height
+        center_y = rect.bottom() + (band_height // 2) - int(progress * travel)
+        overlay_rect = QtCore.QRect(
+            rect.left(),
+            center_y - (band_height // 2),
+            rect.width(),
+            band_height,
+        )
+        travel_ratio = 0.0
+        if rect.height() > 0:
+            travel_ratio = (overlay_rect.center().y() - rect.top()) / float(rect.height())
+        travel_ratio = max(0.0, min(1.0, travel_ratio))
+        alpha_scale = travel_ratio
+
+        gradient = QtGui.QLinearGradient(overlay_rect.left(), overlay_rect.bottom(), overlay_rect.left(), overlay_rect.top())
+        base = QtGui.QColor("#ffffff")
+
+        def _color(alpha: int) -> QtGui.QColor:
+            c = QtGui.QColor(base)
+            c.setAlpha(max(0, min(255, int(alpha * alpha_scale))))
+            return c
+
+        gradient.setColorAt(0.0, _color(0))
+        gradient.setColorAt(0.2, _color(10))
+        gradient.setColorAt(0.5, _color(20))
+        gradient.setColorAt(0.8, _color(10))
+        gradient.setColorAt(1.0, _color(0))
+        painter.save()
+        painter.setClipRect(rect)
+        painter.fillRect(overlay_rect, gradient)
+        painter.restore()
+
     def paint(
         self,
         painter: QtGui.QPainter,
@@ -1518,6 +1925,7 @@ class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
             opt.state &= ~QtWidgets.QStyle.StateFlag.State_HasFocus
         overlay = self._selection_overlay_color(opt.widget, index.row()) if selected else None
         is_offline = str(index.data(self.STATUS_ROLE) or "") == "Offline"
+        is_path_sync_locked = bool(index.data(PATH_SYNC_LOCKED_ROLE))
         if index.column() == 7:
             self._paint_split_progress(
                 painter,
@@ -1525,15 +1933,17 @@ class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
                 index,
                 overlay,
                 offline=is_offline,
+                locked=is_path_sync_locked,
             )
             return
-        if index.column() == QueueTableWidget.FRAME_HANDLING_COLUMN:
+        if index.column() == QueueTableView.FRAME_HANDLING_COLUMN:
             self._paint_combo_cell(
                 painter,
                 opt,
                 index,
                 overlay,
                 offline=is_offline,
+                locked=is_path_sync_locked,
             )
             return
 
@@ -1542,6 +1952,7 @@ class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
             self._paint_selection_overlay(painter, opt.rect, overlay)
             if is_offline:
                 self._paint_offline_stripes(painter, opt.rect)
+            self._paint_path_sync_overlay(painter, opt.rect, opt.widget, locked=is_path_sync_locked)
             return
 
         full_text = opt.text
@@ -1551,6 +1962,7 @@ class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
         self._paint_selection_overlay(painter, opt.rect, overlay)
         if is_offline:
             self._paint_offline_stripes(painter, opt.rect)
+        self._paint_path_sync_overlay(painter, opt.rect, opt.widget, locked=is_path_sync_locked)
 
         text_rect = style.subElementRect(QtWidgets.QStyle.SubElement.SE_ItemViewItemText, opt, opt.widget)
         text_rect = text_rect.adjusted(4, 0, -4, 0)
@@ -1576,6 +1988,7 @@ class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
         overlay: QtGui.QColor | None,
         *,
         offline: bool = False,
+        locked: bool = False,
     ) -> None:
         style = opt.widget.style() if opt.widget is not None else QtWidgets.QApplication.style()
         bg_opt = QtWidgets.QStyleOptionViewItem(opt)
@@ -1584,6 +1997,7 @@ class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
         self._paint_selection_overlay(painter, opt.rect, overlay)
         if offline:
             self._paint_offline_stripes(painter, opt.rect)
+        self._paint_path_sync_overlay(painter, opt.rect, opt.widget, locked=locked)
         widget = opt.widget
         fg = QtGui.QColor(getattr(widget, "combo_text_color", QtGui.QColor("#ffffff")))
         rect = opt.rect
@@ -1618,6 +2032,7 @@ class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
         overlay: QtGui.QColor | None = None,
         *,
         offline: bool = False,
+        locked: bool = False,
     ) -> None:
         style = opt.widget.style() if opt.widget is not None else QtWidgets.QApplication.style()
         text = opt.text
@@ -1630,6 +2045,7 @@ class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
         self._paint_selection_overlay(painter, opt.rect, overlay)
         if offline:
             self._paint_offline_stripes(painter, opt.rect)
+        self._paint_path_sync_overlay(painter, opt.rect, opt.widget, locked=locked)
 
         rect = style.subElementRect(QtWidgets.QStyle.SubElement.SE_ItemViewItemText, bg_opt, bg_opt.widget)
         if rect.width() <= 0 or rect.height() <= 0:
@@ -1712,18 +2128,5 @@ class QueueTreeItemDelegate(QtWidgets.QStyledItemDelegate):
         )
         painter.restore()
 
-    def updateEditorGeometry(
-        self,
-        editor: QtWidgets.QWidget,
-        option: QtWidgets.QStyleOptionViewItem,
-        index: QtCore.QModelIndex,
-    ) -> None:
-        view = self.parent()
-        if not isinstance(view, QtWidgets.QTreeView):
-            super().updateEditorGeometry(editor, option, index)
-            return
-        viewport = view.viewport()
-        left = option.rect.left()
-        right_margin = 8
-        width = max(80, viewport.width() - left - right_margin)
-        editor.setGeometry(QtCore.QRect(left, option.rect.top(), width, option.rect.height()))
+
+QueueTableWidget = QueueTableView

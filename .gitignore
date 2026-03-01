@@ -3,6 +3,7 @@ __pycache__/
 .vscode/
 .codex/
 .tmp_test/
+.tmp_check/
 *.py[cod]
 *$py.class
 .env

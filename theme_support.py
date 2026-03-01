@@ -516,7 +516,7 @@ def build_app_stylesheet(theme: dict[str, str], icons: dict[str, str]) -> str:
             border-radius: 0px;
         }}
         QFrame#toolbarSeparator {{
-            background-color: transparent;
+            background-color: {panel_border};
             border: none;
             min-width: 1px;
             max-width: 1px;
