@@ -39,22 +39,25 @@ def sync_job_after_path_change(
     if not hip_path or not Path(hip_path).exists():
         mark_job_offline(job, "HIP file not found.")
         return
-    key = (hip_path, rop_path)
-    if key not in probe_cache:
-        probe_cache[key] = probe_rop_info(hip_path, rop_path)
-    info = probe_cache.get(key)
-    if info is None:
-        return
-    if info.error == "node_not_found":
-        mark_job_offline(job, "ROP node not found in HIP file.")
-        return
-    apply_rop_info_to_job_model(
-        job,
-        info,
-        normalize_output_display_path,
-        apply_runtime_range=True,
-    )
-    restore_job_online_status(job)
+    try:
+        key = (hip_path, rop_path)
+        if key not in probe_cache:
+            probe_cache[key] = probe_rop_info(hip_path, rop_path)
+        info = probe_cache.get(key)
+        if info is None:
+            return
+        if info.error == "node_not_found":
+            mark_job_offline(job, "ROP node not found in HIP file.")
+            return
+        apply_rop_info_to_job_model(
+            job,
+            info,
+            normalize_output_display_path,
+            apply_runtime_range=True,
+        )
+        restore_job_online_status(job)
+    except Exception as exc:
+        mark_job_offline(job, f"Failed to refresh ROP metadata: {exc}")
 
 
 def propagate_hip_path_change(
@@ -161,29 +164,33 @@ def refresh_jobs_from_rop_metadata(
         scan_info_map = scan_rop_info_for_hip(hip_path)
         single_probe_cache: dict[str, RopInfo | None] = {}
         for target in hip_jobs:
-            info = scan_info_map.get(target.spec.rop_path)
-            if info is None:
-                if target.spec.rop_path not in single_probe_cache:
-                    single_probe_cache[target.spec.rop_path] = probe_rop_info(target.spec.hip_path, target.spec.rop_path)
-                info = single_probe_cache[target.spec.rop_path]
-            if info is None:
-                continue
-            if info.error == "node_not_found":
-                mark_job_offline(target, "ROP node not found in HIP file.")
+            try:
+                info = scan_info_map.get(target.spec.rop_path)
+                if info is None:
+                    if target.spec.rop_path not in single_probe_cache:
+                        single_probe_cache[target.spec.rop_path] = probe_rop_info(target.spec.hip_path, target.spec.rop_path)
+                    info = single_probe_cache[target.spec.rop_path]
+                if info is None:
+                    continue
+                if info.error == "node_not_found":
+                    mark_job_offline(target, "ROP node not found in HIP file.")
+                    changed_ids.append(target.id)
+                    continue
+                if reset_override_to_rop:
+                    target.spec.frame_range_mode = "use_rop"
+                    target.spec.start_frame = None
+                    target.spec.end_frame = None
+                    target.spec.step = None
+                    clear_job_resume_runtime_state(target)
+                apply_rop_info_to_job_model(
+                    target,
+                    info,
+                    normalize_output_display_path,
+                    apply_runtime_range=True,
+                )
+                restore_job_online_status(target)
                 changed_ids.append(target.id)
-                continue
-            if reset_override_to_rop:
-                target.spec.frame_range_mode = "use_rop"
-                target.spec.start_frame = None
-                target.spec.end_frame = None
-                target.spec.step = None
-                clear_job_resume_runtime_state(target)
-            apply_rop_info_to_job_model(
-                target,
-                info,
-                normalize_output_display_path,
-                apply_runtime_range=True,
-            )
-            restore_job_online_status(target)
-            changed_ids.append(target.id)
+            except Exception as exc:
+                mark_job_offline(target, f"Failed to refresh ROP metadata: {exc}")
+                changed_ids.append(target.id)
     return changed_ids

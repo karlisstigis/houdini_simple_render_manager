@@ -1407,11 +1407,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if job.spec.frame_range_mode == "use_rop":
                 if job.runtime.runtime_start_frame is None or job.runtime.runtime_end_frame is None:
-                    probe_err = self._probe_and_apply_job_rop_metadata(job)
+                    try:
+                        probe_err = self._probe_and_apply_job_rop_metadata(job)
+                    except Exception as exc:
+                        probe_err = f"probe_failed: {exc}"
                     if probe_err == "node_not_found":
                         self._mark_job_offline(job, "ROP node not found in HIP file.")
                     elif probe_err:
                         self._append_log("Stderr", f"[Add Job] Could not resolve ROP range for {job.spec.rop_path}: {probe_err}\n")
+                        if str(probe_err).startswith("probe_failed:"):
+                            self._mark_job_offline(job, str(probe_err))
 
             if job.spec.frame_range_mode == "override":
                 strict_probe = self._probe_rop_strict_frame_range(job.spec.hip_path, job.spec.rop_path)
@@ -2034,7 +2039,12 @@ class MainWindow(QtWidgets.QMainWindow):
         elif chosen == act_reload_from_rop:
             target_ids = [j.id for j in target_jobs]
             before_states = self._job_states_for_ids(target_ids)
-            changed_ids = self._refresh_jobs_from_rop_metadata(target_jobs, reset_override_to_rop=True)
+            try:
+                changed_ids = self._refresh_jobs_from_rop_metadata(target_jobs, reset_override_to_rop=True)
+            except Exception as exc:
+                safe_message(self, "Reload Failed", f"Failed to reload job metadata: {exc}", traceback.format_exc())
+                self._refresh_queue_preserve_selection()
+                return
             if changed_ids:
                 after_states = self._job_states_for_ids(changed_ids)
                 self._push_history_command(
@@ -2072,12 +2082,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 int(job.runtime.runtime_step),
             )
         if mutate_job:
-            err = self._probe_and_apply_job_rop_metadata(job)
+            try:
+                err = self._probe_and_apply_job_rop_metadata(job)
+            except Exception as exc:
+                self._append_log("Stderr", f"[ROP Probe] Unexpected error for {job.spec.rop_path}: {exc}\n")
+                self._mark_job_offline(job, f"Failed to resolve ROP metadata: {exc}")
+                self._save_and_refresh_queue(select_job_id=job.id)
+                return None
             if err == "node_not_found":
                 self._mark_job_offline(job, "ROP node not found in HIP file.")
                 self._save_and_refresh_queue(select_job_id=job.id)
                 return None
             if err:
+                if str(err).startswith("probe_failed:"):
+                    self._mark_job_offline(job, str(err))
+                    self._save_and_refresh_queue(select_job_id=job.id)
                 return None
             if (
                 job.runtime.runtime_start_frame is not None
@@ -2090,7 +2109,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     int(job.runtime.runtime_step),
                 )
         else:
-            info = self._probe_rop_info(job.spec.hip_path, job.spec.rop_path)
+            try:
+                info = self._probe_rop_info(job.spec.hip_path, job.spec.rop_path)
+            except Exception as exc:
+                self._append_log("Stderr", f"[ROP Probe] Unexpected error for {job.spec.rop_path}: {exc}\n")
+                self._mark_job_offline(job, f"Failed to resolve ROP metadata: {exc}")
+                self._save_and_refresh_queue(select_job_id=job.id)
+                return None
             if info is None:
                 return None
             if info.error == "node_not_found":
@@ -3383,135 +3408,138 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if item is None:
             return
-        row = item.row()
-        col = item.column()
-        if col not in {0, 1, 2, 3, 4, 5}:
-            return
-        if not (0 <= row < len(self.jobs)):
-            return
-        job = self.jobs[row]
-        selected_rows = self._selected_rows()
-        if row not in selected_rows:
-            selected_rows = [row]
-        target_rows = selected_rows
-        target_job_ids = [self.jobs[r].id for r in target_rows if 0 <= r < len(self.jobs)]
-        before_states = self._job_states_for_ids(target_job_ids)
-        if col == 5:
-            new_mode = FrameHandlingMode.from_label(item.text())
-            changed = False
-            for target_row in target_rows:
-                target = self.jobs[target_row]
-                if self._is_active_job(target):
-                    continue
-                if target.frame_handling_mode != new_mode:
-                    target.frame_handling_mode = new_mode
+        try:
+            row = item.row()
+            col = item.column()
+            if col not in {0, 1, 2, 3, 4, 5}:
+                return
+            if not (0 <= row < len(self.jobs)):
+                return
+            job = self.jobs[row]
+            selected_rows = self._selected_rows()
+            if row not in selected_rows:
+                selected_rows = [row]
+            target_rows = selected_rows
+            target_job_ids = [self.jobs[r].id for r in target_rows if 0 <= r < len(self.jobs)]
+            before_states = self._job_states_for_ids(target_job_ids)
+            if col == 5:
+                new_mode = FrameHandlingMode.from_label(item.text())
+                changed = False
+                for target_row in target_rows:
+                    target = self.jobs[target_row]
+                    if self._is_active_job(target):
+                        continue
+                    if target.frame_handling_mode != new_mode:
+                        target.frame_handling_mode = new_mode
+                        changed = True
+                if not changed:
+                    self._refresh_queue_preserve_selection()
+                    return
+                after_states = self._job_states_for_ids(target_job_ids)
+                self._push_history_command(
+                    {
+                        "kind": "update_jobs",
+                        "before": before_states,
+                        "after": after_states,
+                        "undo_select_job_ids": target_job_ids,
+                        "redo_select_job_ids": target_job_ids,
+                    }
+                )
+                self._save_and_refresh_queue(select_job_ids=target_job_ids)
+                return
+            if col == 0:
+                new_name = item.text().strip()
+                changed = False
+                for target_row in target_rows:
+                    target = self.jobs[target_row]
+                    if self._is_active_job(target):
+                        continue
+                    target.name = new_name
                     changed = True
-            if not changed:
-                self._refresh_queue_preserve_selection()
+                if not changed:
+                    self._refresh_queue_preserve_selection()
+                    return
+                after_states = self._job_states_for_ids(target_job_ids)
+                self._push_history_command(
+                    {
+                        "kind": "update_jobs",
+                        "before": before_states,
+                        "after": after_states,
+                        "undo_select_job_ids": target_job_ids,
+                        "redo_select_job_ids": target_job_ids,
+                    }
+                )
+                self._save_and_refresh_queue(select_job_ids=target_job_ids)
                 return
-            after_states = self._job_states_for_ids(target_job_ids)
-            self._push_history_command(
-                {
-                    "kind": "update_jobs",
-                    "before": before_states,
-                    "after": after_states,
-                    "undo_select_job_ids": target_job_ids,
-                    "redo_select_job_ids": target_job_ids,
-                }
-            )
-            self._save_and_refresh_queue(select_job_ids=target_job_ids)
-            return
-        if col == 0:
-            new_name = item.text().strip()
+            if col in {1, 2}:
+                try:
+                    source_text = validate_queue_path_value_model(col, item.text())
+                except ValueError as exc:
+                    safe_message(self, "Invalid Path", str(exc))
+                    self._refresh_queue_preserve_selection()
+                    return
+                old_hip = str(job.spec.hip_path or "").strip()
+                old_rop = str(job.spec.rop_path or "").strip()
+                if col == 1:
+                    changed_ids = self._propagate_hip_path_change(old_hip, source_text)
+                else:
+                    changed_ids = self._propagate_rop_path_change(old_hip, old_rop, source_text)
+                if not changed_ids:
+                    self._refresh_queue_preserve_selection()
+                    return
+                after_states = self._job_states_for_ids(changed_ids)
+                self._push_history_command(
+                    {
+                        "kind": "update_jobs",
+                        "before": before_states,
+                        "after": after_states,
+                        "undo_select_job_ids": target_job_ids,
+                        "redo_select_job_ids": self._selection_ids_for_refresh(changed_ids) or [],
+                    }
+                )
+                self._save_and_refresh_queue(select_job_ids=self._selection_ids_for_refresh(changed_ids))
+                return
+            # Frame Range / Step bulk-edit uses the edited row values as the source payload.
+            frame_item = self.queue_table.item(row, 3)
+            step_item = self.queue_table.item(row, 4)
+            frame_text = (frame_item.text() if frame_item is not None else "").strip()
+            step_text = (step_item.text() if step_item is not None else "").strip()
             changed = False
             for target_row in target_rows:
                 target = self.jobs[target_row]
                 if self._is_active_job(target):
                     continue
-                target.name = new_name
-                changed = True
+                if target.strict_frame_range:
+                    continue
+                try:
+                    target_frame_text = frame_text if col == 3 else self._queue_edit_frame_text_for_job(target)
+                    target_step_text = step_text if col == 4 else self._queue_edit_step_text_for_job(target)
+                    apply_queue_frame_override_text(target, target_frame_text, target_step_text)
+                    changed = True
+                except ValueError as exc:
+                    safe_message(self, "Invalid Frame Override", str(exc))
+                    self._refresh_queue_preserve_selection()
+                    return
+                except Exception as exc:
+                    safe_message(self, "Error", f"Failed to update frame override: {exc}", traceback.format_exc())
+                    self._refresh_queue_preserve_selection()
+                    return
             if not changed:
                 self._refresh_queue_preserve_selection()
                 return
-            after_states = self._job_states_for_ids(target_job_ids)
             self._push_history_command(
                 {
                     "kind": "update_jobs",
                     "before": before_states,
-                    "after": after_states,
+                    "after": self._job_states_for_ids(target_job_ids),
                     "undo_select_job_ids": target_job_ids,
                     "redo_select_job_ids": target_job_ids,
                 }
             )
             self._save_and_refresh_queue(select_job_ids=target_job_ids)
-            return
-        if col in {1, 2}:
-            try:
-                source_text = validate_queue_path_value_model(col, item.text())
-            except ValueError as exc:
-                safe_message(self, "Invalid Path", str(exc))
-                self._refresh_queue_preserve_selection()
-                return
-            old_hip = str(job.spec.hip_path or "").strip()
-            old_rop = str(job.spec.rop_path or "").strip()
-            if col == 1:
-                changed_ids = self._propagate_hip_path_change(old_hip, source_text)
-            else:
-                changed_ids = self._propagate_rop_path_change(old_hip, old_rop, source_text)
-            if not changed_ids:
-                self._refresh_queue_preserve_selection()
-                return
-            after_states = self._job_states_for_ids(changed_ids)
-            self._push_history_command(
-                {
-                    "kind": "update_jobs",
-                    "before": before_states,
-                    "after": after_states,
-                    "undo_select_job_ids": target_job_ids,
-                    "redo_select_job_ids": self._selection_ids_for_refresh(changed_ids) or [],
-                }
-            )
-            self._save_and_refresh_queue(select_job_ids=self._selection_ids_for_refresh(changed_ids))
-            return
-        # Frame Range / Step bulk-edit uses the edited row values as the source payload.
-        frame_item = self.queue_table.item(row, 3)
-        step_item = self.queue_table.item(row, 4)
-        frame_text = (frame_item.text() if frame_item is not None else "").strip()
-        step_text = (step_item.text() if step_item is not None else "").strip()
-        changed = False
-        for target_row in target_rows:
-            target = self.jobs[target_row]
-            if self._is_active_job(target):
-                continue
-            if target.strict_frame_range:
-                continue
-            try:
-                target_frame_text = frame_text if col == 3 else self._queue_edit_frame_text_for_job(target)
-                target_step_text = step_text if col == 4 else self._queue_edit_step_text_for_job(target)
-                apply_queue_frame_override_text(target, target_frame_text, target_step_text)
-                changed = True
-            except ValueError as exc:
-                safe_message(self, "Invalid Frame Override", str(exc))
-                self._refresh_queue_preserve_selection()
-                return
-            except Exception as exc:
-                safe_message(self, "Error", f"Failed to update frame override: {exc}", traceback.format_exc())
-                self._refresh_queue_preserve_selection()
-                return
-        if not changed:
+        except Exception as exc:
+            safe_message(self, "Queue Edit Error", f"Failed to apply queue edit: {exc}", traceback.format_exc())
             self._refresh_queue_preserve_selection()
-            return
-        after_states = self._job_states_for_ids(target_job_ids)
-        self._push_history_command(
-            {
-                "kind": "update_jobs",
-                "before": before_states,
-                "after": after_states,
-                "undo_select_job_ids": target_job_ids,
-                "redo_select_job_ids": target_job_ids,
-            }
-        )
-        self._save_and_refresh_queue(select_job_ids=target_job_ids)
 
     def _on_queue_frame_handling_chosen(self, row: int, text: str) -> None:
         if not (0 <= row < len(self.jobs)):
