@@ -108,26 +108,41 @@ class QueueTableModel(QtCore.QAbstractTableModel):
         return None
 
     def _display_value(self, job: RenderJob, column: int) -> str:
-        values = [
-            job.display_name(),
-            job.spec.hip_path,
-            job.spec.rop_path,
-            job.frame_range_display(),
-            job.step_display(),
-            job.frame_handling_label(),
-            str(job.runtime.status.value if job.spec.enabled else "Disabled"),
-            job.view.percent_text or "",
-            self._hooks.job_phase_display(job),
-            self._hooks.job_time_remaining_display(job),
-            self._hooks.job_frame_display(job),
-            job.view.prev_frame_time_text or "-",
-            job.view.avg_frame_time_text or "-",
-            self._hooks.job_started_time_display(job),
-            self._hooks.job_end_time_display(job),
-            self._hooks.job_total_time_display(job),
-            job.view.out_path or "",
-        ]
-        return values[column]
+        if column == self.NAME_COLUMN:
+            return job.display_name()
+        if column == self.HIP_COLUMN:
+            return job.spec.hip_path
+        if column == self.ROP_COLUMN:
+            return job.spec.rop_path
+        if column == self.FRAME_RANGE_COLUMN:
+            return job.frame_range_display()
+        if column == self.STEP_COLUMN:
+            return job.step_display()
+        if column == self.FRAME_HANDLING_COLUMN:
+            return job.frame_handling_label()
+        if column == self.STATUS_COLUMN:
+            return str(job.runtime.status.value if job.spec.enabled else "Disabled")
+        if column == self.PROGRESS_COLUMN:
+            return job.view.percent_text or ""
+        if column == self.PHASE_COLUMN:
+            return self._hooks.job_phase_display(job)
+        if column == self.REMAINING_COLUMN:
+            return self._hooks.job_time_remaining_display(job)
+        if column == self.FRAME_COLUMN:
+            return self._hooks.job_frame_display(job)
+        if column == self.FRAME_TIME_COLUMN:
+            return job.view.prev_frame_time_text or "-"
+        if column == self.AVG_FRAME_TIME_COLUMN:
+            return job.view.avg_frame_time_text or "-"
+        if column == self.STARTED_COLUMN:
+            return self._hooks.job_started_time_display(job)
+        if column == self.COMPLETED_COLUMN:
+            return self._hooks.job_end_time_display(job)
+        if column == self.RENDER_TIME_COLUMN:
+            return self._hooks.job_total_time_display(job)
+        if column == self.OUTPUT_COLUMN:
+            return job.view.out_path or ""
+        return ""
 
     @staticmethod
     def _override_flags(job: RenderJob) -> tuple[bool, bool]:

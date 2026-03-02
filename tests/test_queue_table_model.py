@@ -34,6 +34,7 @@ class QueueTableModelTests(unittest.TestCase):
                 queue_progress_split_values=lambda job: (25, 75),
                 edit_job_column=edit_hook or (lambda row, column, text: True),
                 can_edit_job_column=lambda job, column: column in {0, 1, 2, 3, 4, 5} and job.runtime.status != JobStatus.RUNNING and not (column in {3, 4} and job.spec.strict_frame_range),
+                is_job_path_sync_locked=lambda job: False,
                 row_style_payload=lambda job, row: {
                     "background": QtGui.QBrush(QtGui.QColor("#111111")) if job.runtime.status == JobStatus.RUNNING else None,
                     "foreground": QtGui.QBrush(QtGui.QColor("#ffffff")) if job.runtime.status == JobStatus.RUNNING else None,

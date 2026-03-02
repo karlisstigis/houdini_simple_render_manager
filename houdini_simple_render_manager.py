@@ -1830,6 +1830,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return source_index
         return proxy.mapFromSource(source_index)
 
+    def _queue_source_rows_from_view_rows(self, view_rows: list[int]) -> list[int]:
+        source_rows = [self._queue_source_row_from_view_row(row) for row in view_rows]
+        return sorted({row for row in source_rows if 0 <= row < len(self.jobs)})
+
     def _selected_row(self) -> int:
         model = self.queue_table.selectionModel()
         rows = model.selectedRows() if model is not None else []
@@ -1839,14 +1843,7 @@ class MainWindow(QtWidgets.QMainWindow):
         model = self.queue_table.selectionModel()
         if model is None:
             return []
-        rows = sorted(
-            {
-                self._queue_source_row_from_view_row(idx.row())
-                for idx in model.selectedRows()
-                if idx.isValid()
-            }
-        )
-        return [r for r in rows if 0 <= r < len(self.jobs)]
+        return self._queue_source_rows_from_view_rows([idx.row() for idx in model.selectedRows() if idx.isValid()])
 
     def _selected_jobs(self) -> list[RenderJob]:
         return [self.jobs[r] for r in self._selected_rows() if 0 <= r < len(self.jobs)]
@@ -1922,6 +1919,46 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _reset_job_state(self, job: RenderJob) -> None:
         reset_job_state_model(job)
+
+    def _prepare_duplicate_job(self, source: RenderJob) -> RenderJob | None:
+        clone = self._job_from_persisted_dict(self._job_to_persisted_dict(source))
+        if clone is None:
+            return None
+        clone.spec.id = uuid4().hex
+        clone.runtime.status = JobStatus.QUEUED
+        clone.runtime.started_at = None
+        clone.runtime.finished_at = None
+        clone.runtime.exit_code = None
+        clone.runtime.error_summary = ""
+        clone.runtime.offline_detected_reason = ""
+        clone.view.progress_text = "-"
+        clone.view.percent_text = "-"
+        clone.view.usd_build_percent = None
+        clone.view.last_frame_seen = None
+        clone.view.build_pass_completed = False
+        clone.view.phase_text = ""
+        clone.view.prev_frame_time_text = "-"
+        clone.view.avg_frame_time_text = "-"
+        clone.view.est_job_time_text = "-"
+        clone.view.render_frame_started_at = {}
+        clone.view.render_frame_durations_sec = []
+        clone.view.render_completed_frames = set()
+        clone.runtime.offline_previous_status = None
+        clone.runtime.resume_start_frame_runtime = None
+        clone.runtime.resume_end_frame_runtime = None
+        clone.runtime.resume_step_runtime = None
+        clone.runtime.resume_completed_baseline_count = 0
+        clone.runtime.chunk_start_frame_runtime = None
+        clone.runtime.chunk_end_frame_runtime = None
+        clone.runtime.chunk_step_runtime = None
+        clone.runtime.chunk_index_runtime = 0
+        clone.runtime.chunk_total_runtime = 0
+        clone.runtime.chunk_attempt_runtime = 0
+        clone.runtime.chunk_retry_count_runtime = 0
+        clone.runtime.chunk_ranges_runtime = []
+        clone.runtime.chunk_retry_total_failures_runtime = 0
+        clone.runtime.log_file_path = str(self.config.new_job_log_path(clone.display_name()))
+        return clone
 
     def _reset_jobs_to_queued(self, target_jobs: list[RenderJob]) -> list[str]:
         changed_ids: list[str] = []
@@ -3046,43 +3083,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._is_active_job(source):
                 skipped_running = True
                 continue
-            clone = self._job_from_persisted_dict(self._job_to_persisted_dict(source))
+            clone = self._prepare_duplicate_job(source)
             if clone is None:
                 continue
-            clone.spec.id = uuid4().hex
-            clone.runtime.status = JobStatus.QUEUED
-            clone.runtime.started_at = None
-            clone.runtime.finished_at = None
-            clone.runtime.exit_code = None
-            clone.runtime.error_summary = ""
-            clone.runtime.offline_detected_reason = ""
-            clone.view.progress_text = "-"
-            clone.view.percent_text = "-"
-            clone.view.usd_build_percent = None
-            clone.view.last_frame_seen = None
-            clone.view.build_pass_completed = False
-            clone.view.phase_text = ""
-            clone.view.prev_frame_time_text = "-"
-            clone.view.avg_frame_time_text = "-"
-            clone.view.est_job_time_text = "-"
-            clone.view.render_frame_started_at = {}
-            clone.view.render_frame_durations_sec = []
-            clone.view.render_completed_frames = set()
-            clone.runtime.offline_previous_status = None
-            clone.runtime.resume_start_frame_runtime = None
-            clone.runtime.resume_end_frame_runtime = None
-            clone.runtime.resume_step_runtime = None
-            clone.runtime.resume_completed_baseline_count = 0
-            clone.runtime.chunk_start_frame_runtime = None
-            clone.runtime.chunk_end_frame_runtime = None
-            clone.runtime.chunk_step_runtime = None
-            clone.runtime.chunk_index_runtime = 0
-            clone.runtime.chunk_total_runtime = 0
-            clone.runtime.chunk_attempt_runtime = 0
-            clone.runtime.chunk_retry_count_runtime = 0
-            clone.runtime.chunk_ranges_runtime = []
-            clone.runtime.chunk_retry_total_failures_runtime = 0
-            clone.runtime.log_file_path = str(self.config.new_job_log_path(clone.display_name()))
             duplicates.append(clone)
         if not duplicates:
             if skipped_running:
@@ -3174,13 +3177,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_status_message("Clear queue filters before reordering.", 3000)
             self._refresh_queue_table(select_job_ids=self._selected_job_ids() or None)
             return
-        rows = sorted(
-            {
-                self._queue_source_row_from_view_row(int(r))
-                for r in source_rows
-                if self._queue_source_row_from_view_row(int(r)) >= 0
-            }
-        )
+        rows = self._queue_source_rows_from_view_rows([int(r) for r in source_rows])
         target_row = self._queue_source_row_from_view_row(target_row) if target_row < self.queue_table.rowCount() else len(self.jobs)
         if not rows:
             self._refresh_queue_table()
@@ -3277,12 +3274,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
             target_job_id = select_job_id or preserved_job_id
             target_job_ids = list(select_job_ids or preserved_job_ids)
+            target_job_id_set = set(target_job_ids)
             selected_applied = False
             if target_job_ids:
                 sm = self.queue_table.selectionModel()
                 if sm is not None:
                     for row, job in enumerate(self.jobs):
-                        if job.id in target_job_ids:
+                        if job.id in target_job_id_set:
                             model_idx = self._queue_view_index_from_source_row(row, 0)
                             if not model_idx.isValid():
                                 continue
