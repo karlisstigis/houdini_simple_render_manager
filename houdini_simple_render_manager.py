@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import traceback
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,6 @@ from action_policy import (
     can_remove_jobs,
     can_resume_job_from_output,
     is_job_runnable,
-    can_start_queue,
 )
 from atomic_io import read_json_file, write_json_atomic
 from diagnostics import DiagnosticsSnapshot, build_diagnostics_report
@@ -68,13 +68,16 @@ from queue_persistence import (
 )
 from queue_execution import (
     advance_job_to_next_chunk as advance_job_to_next_chunk_model,
-    apply_render_finished_state as apply_render_finished_state_model,
-    mark_job_done_without_render as mark_job_done_without_render_model,
-    plan_frame_handling as plan_frame_handling_model,
     retry_current_chunk as retry_current_chunk_model,
-    select_next_runnable_job,
 )
 from queue_filter_proxy import QueueFilterProxyModel, QUEUE_STATUS_FILTER_OPTIONS
+from queue_run_executor import (
+    handle_render_worker_crash as handle_render_worker_crash_model,
+    handle_render_worker_message as handle_render_worker_message_model,
+    on_render_finished as on_render_finished_model,
+    start_job_runtime as start_job_runtime_model,
+    update_job_progress_from_output as update_job_progress_from_output_model,
+)
 from queue_runtime_state import (
     format_duration_short as format_duration_short_model,
     initialize_job_chunk_runtime as initialize_job_chunk_runtime_model,
@@ -87,6 +90,18 @@ from queue_runtime_state import (
     total_frames_for_job as total_frames_for_job_model,
     update_job_render_timing_stats as update_job_render_timing_stats_model,
 )
+from queue_lifecycle import (
+    QueueLifecycleState,
+    decide_next_job as decide_next_job_model,
+    evaluate_start_request as evaluate_start_request_model,
+    with_pause_toggled as with_pause_toggled_model,
+    with_queue_finished as with_queue_finished_model,
+    with_queue_resumed as with_queue_resumed_model,
+    with_queue_started as with_queue_started_model,
+    with_stop_requested as with_stop_requested_model,
+)
+from queue_run_reporting import build_queue_run_summary as build_queue_run_summary_model
+from queue_run_reporting import write_queue_snapshot as write_queue_snapshot_model
 from queue_table_model import QueueTableModel, QueueTableModelHooks
 from queue_tree_ui import (
     TREE_HIP_ROLE,
@@ -114,6 +129,11 @@ from rop_metadata import (
     RopInfo,
     apply_rop_info_to_job as apply_rop_info_to_job_model,
 )
+from notification_rules import (
+    classified_render_error_notification as classified_render_error_notification_model,
+    notification_messages_for_log as notification_messages_for_log_model,
+    notification_summary_for_line as notification_summary_for_line_model,
+)
 from theme_support import DEFAULT_THEME, build_app_stylesheet, ensure_theme_icons, normalize_theme_colors
 from widgets import AddJobPanel, CleanStepSpinBox, JobPropertiesPanel, PanelFrame, PreferencesDialog, QueueTableItemDelegate, QueueTableWidget, RopListWidget
 from worker_client import RenderWorkerClient, ScanWorkerClient
@@ -125,6 +145,32 @@ CONFIG_DIR_NAME = "HoudiniSimpleRenderManager"
 CONFIG_FILE_NAME = "config.json"
 THEME_FILE_NAME = "theme.json"
 HOUDINI_SCRIPTS_DIR_NAME = "houdini_scripts"
+LOGGER = logging.getLogger(__name__)
+
+DEFAULT_QUEUE_COLUMN_WIDTHS: dict[int, int] = {
+    QueueTableModel.NAME_COLUMN: 220,
+    QueueTableModel.HIP_COLUMN: 260,
+    QueueTableModel.ROP_COLUMN: 220,
+    QueueTableModel.FRAME_RANGE_COLUMN: 95,
+    QueueTableModel.STEP_COLUMN: 70,
+    QueueTableModel.FRAME_HANDLING_COLUMN: 170,
+    QueueTableModel.STATUS_COLUMN: 80,
+    QueueTableModel.PROGRESS_COLUMN: 110,
+    QueueTableModel.PHASE_COLUMN: 90,
+    QueueTableModel.USD_COLUMN: 92,
+    QueueTableModel.REMAINING_COLUMN: 100,
+    QueueTableModel.FRAME_COLUMN: 95,
+    QueueTableModel.FRAME_TIME_COLUMN: 85,
+    QueueTableModel.AVG_FRAME_TIME_COLUMN: 90,
+    QueueTableModel.STARTED_COLUMN: 90,
+    QueueTableModel.COMPLETED_COLUMN: 100,
+    QueueTableModel.RENDER_TIME_COLUMN: 100,
+    QueueTableModel.OUTPUT_COLUMN: 260,
+}
+
+
+def _log_suppressed_exception(context: str, exc: Exception) -> None:
+    LOGGER.debug("%s: %s", context, exc, exc_info=True)
 
 
 class ConfigStore:
@@ -167,14 +213,14 @@ class ConfigStore:
             loaded = read_json_file(self.path)
             if isinstance(loaded, dict):
                 self.data.update(loaded)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_suppressed_exception("ConfigStore.load", exc)
 
     def save(self) -> None:
         try:
             write_json_atomic(self.path, self.data)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_suppressed_exception("ConfigStore.save", exc)
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)
@@ -212,16 +258,16 @@ class ConfigStore:
                 for key, value in loaded.items():
                     if key in theme and isinstance(value, str) and value.strip():
                         theme[key] = value.strip()
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_suppressed_exception("ConfigStore.load_theme", exc)
         return theme
 
     def save_theme(self, theme: dict[str, str]) -> None:
         try:
             payload = {k: str(v) for k, v in theme.items() if k in DEFAULT_THEME}
             write_json_atomic(self.theme_path, payload)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_suppressed_exception("ConfigStore.save_theme", exc)
 
 
 def get_appdata_dir() -> Path:
@@ -298,6 +344,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._queue_next_search_index: int = 0
 
         self.log_entries: list[tuple[str, str]] = []
+        self._last_notification_signature: tuple[str, str] | None = None
         self._active_render_request_id = ""
         self._active_scan_request_id = ""
         self._create_job_scan_in_progress = False
@@ -457,17 +504,17 @@ class MainWindow(QtWidgets.QMainWindow):
         saved_left_width = self.config.get("main_splitter_left_width")
         try:
             self._main_splitter_left_width_pref = int(saved_left_width) if saved_left_width is not None else None
-        except Exception:
+        except (TypeError, ValueError):
             self._main_splitter_left_width_pref = None
         saved_top_height = self.config.get("left_splitter_top_height")
         try:
             self._left_splitter_top_height_pref = int(saved_top_height) if saved_top_height is not None else None
-        except Exception:
+        except (TypeError, ValueError):
             self._left_splitter_top_height_pref = None
         saved_notifications_height = self.config.get("left_notifications_height")
         try:
             self._left_notifications_height_pref = int(saved_notifications_height) if saved_notifications_height is not None else None
-        except Exception:
+        except (TypeError, ValueError):
             self._left_notifications_height_pref = None
         QtCore.QTimer.singleShot(0, self._apply_main_splitter_left_width_pref)
         QtCore.QTimer.singleShot(0, self._apply_left_splitter_default_sizes)
@@ -506,19 +553,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if callable(cancel_inline_edit):
             try:
                 cancel_inline_edit()
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_suppressed_exception("MainWindow._prepare_view_for_locked_refresh.cancel_inline_edit", exc)
         focus = QtWidgets.QApplication.focusWidget()
         try:
             if focus is not None and (focus is view or view.isAncestorOf(focus)):
                 if isinstance(focus, QtWidgets.QWidget):
                     focus.clearFocus()
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_suppressed_exception("MainWindow._prepare_view_for_locked_refresh.focus_clear", exc)
         try:
             view.clearFocus()
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_suppressed_exception("MainWindow._prepare_view_for_locked_refresh.view_clear_focus", exc)
 
     @staticmethod
     def _dropped_hip_path(event: QtGui.QDropEvent | QtGui.QDragEnterEvent) -> str | None:
@@ -953,19 +1000,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def _chunk_size_value(self) -> int:
         try:
             return int(getattr(self, "spin_chunk_size", None).value())  # type: ignore[union-attr]
-        except Exception:
+        except (AttributeError, TypeError, ValueError):
             return 1
 
     def _retry_count_value(self) -> int:
         try:
             return int(getattr(self, "spin_auto_retry", None).value())  # type: ignore[union-attr]
-        except Exception:
+        except (AttributeError, TypeError, ValueError):
             return 0
 
     def _retry_delay_value(self) -> int:
         try:
             return int(getattr(self, "spin_retry_delay", None).value())  # type: ignore[union-attr]
-        except Exception:
+        except (AttributeError, TypeError, ValueError):
             return 0
 
     def _default_chunking_enabled(self) -> bool:
@@ -977,19 +1024,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def _default_chunk_size(self) -> int:
         try:
             return max(1, int(self.config.get("default_chunk_size", 10)))
-        except Exception:
+        except (TypeError, ValueError):
             return 10
 
     def _default_retry_count(self) -> int:
         try:
             return max(0, int(self.config.get("default_retry_count", 1)))
-        except Exception:
+        except (TypeError, ValueError):
             return 1
 
     def _default_retry_delay(self) -> int:
         try:
             return max(0, int(self.config.get("default_retry_delay", 5)))
-        except Exception:
+        except (TypeError, ValueError):
             return 5
 
     def _default_device_mode(self) -> DeviceOverrideMode:
@@ -1085,7 +1132,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     )
                     cpu_name = str(cpu_result.stdout or "").strip()
-                except Exception:
+                except (OSError, subprocess.SubprocessError):
                     cpu_name = ""
                 if cpu_name:
                     devices.append({"id": "cpu", "name": cpu_name})
@@ -1117,7 +1164,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     gpu_index += 1
                 gpu_devices.sort(key=lambda item: self._device_brand_sort_key(str(item.get("name", ""))))
                 devices.extend(gpu_devices)
-            except Exception:
+            except (OSError, subprocess.SubprocessError):
                 devices = []
         self._render_device_infos = list(devices)
         return list(devices)
@@ -1163,6 +1210,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 return f"{phase} ({chunk_part})"
             return chunk_part
         return phase
+
+    def _job_usd_status_display(self, job: RenderJob) -> str:
+        retained_path = str(job.runtime.retained_usd_path or "").strip()
+        if not retained_path or not bool(job.runtime.retained_usd_exists):
+            return "Build"
+        if self._retained_usd_stale_reason(job):
+            return "Rebuild"
+        return "Reusable"
+
+    def _job_usd_status_tooltip(self, job: RenderJob) -> str:
+        retained_path = str(job.runtime.retained_usd_path or "").strip()
+        if not retained_path or not bool(job.runtime.retained_usd_exists):
+            return "No retained USD is available for this job. USD will be built during render."
+        reason = self._retained_usd_stale_reason(job)
+        if reason:
+            return reason
+        if not bool(job.spec.reuse_retained_usd):
+            return "Retained USD is reusable, but 'Use existing USD files' is disabled."
+        return "Retained USD can be reused on next render."
 
     @staticmethod
     def _job_time_remaining_display(job: RenderJob) -> str:
@@ -1468,6 +1534,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 jobs_provider=lambda: self.jobs,
                 is_active_job=self._is_active_job,
                 job_phase_display=self._job_phase_display,
+                job_usd_status_display=self._job_usd_status_display,
+                job_usd_status_tooltip=self._job_usd_status_tooltip,
                 job_time_remaining_display=self._job_time_remaining_display,
                 job_frame_display=self._job_frame_display,
                 job_started_time_display=self._job_started_time_display,
@@ -1497,6 +1565,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.queue_table.setItemDelegate(QueueTableItemDelegate())
         self.queue_table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.queue_table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.queue_table.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
         self.queue_table.verticalScrollBar().setSingleStep(20)
         self.queue_table.horizontalScrollBar().setSingleStep(20)
         self.queue_table.setDragEnabled(True)
@@ -1513,23 +1582,9 @@ class MainWindow(QtWidgets.QMainWindow):
         header.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         for col in range(self.queue_table.columnCount()):
             header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.Interactive)
-        self.queue_table.setColumnWidth(0, 220)
-        self.queue_table.setColumnWidth(1, 260)
-        self.queue_table.setColumnWidth(2, 220)
-        self.queue_table.setColumnWidth(3, 95)
-        self.queue_table.setColumnWidth(4, 70)
-        self.queue_table.setColumnWidth(5, 170)
-        self.queue_table.setColumnWidth(6, 80)
-        self.queue_table.setColumnWidth(7, 110)
-        self.queue_table.setColumnWidth(8, 90)
-        self.queue_table.setColumnWidth(9, 100)
-        self.queue_table.setColumnWidth(10, 95)
-        self.queue_table.setColumnWidth(11, 85)
-        self.queue_table.setColumnWidth(12, 90)
-        self.queue_table.setColumnWidth(13, 90)
-        self.queue_table.setColumnWidth(14, 100)
-        self.queue_table.setColumnWidth(15, 100)
-        self.queue_table.setColumnWidth(16, 260)
+        for logical, width in DEFAULT_QUEUE_COLUMN_WIDTHS.items():
+            if 0 <= int(logical) < self.queue_table.columnCount():
+                self.queue_table.setColumnWidth(int(logical), int(width))
         self._queue_default_column_widths = {
             logical: int(self.queue_table.columnWidth(logical)) for logical in range(self.queue_table.columnCount())
         }
@@ -1742,7 +1797,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 chunk_size = max(1, int(runtime_defaults.get("chunk_size", 10)))
                 retry_count = max(0, int(runtime_defaults.get("retry_count", 1)))
                 retry_delay = max(0, int(runtime_defaults.get("retry_delay", 5)))
-            except Exception:
+            except (TypeError, ValueError):
                 chunking_enabled = False
                 chunk_size = 10
                 retry_count = 1
@@ -2085,6 +2140,17 @@ class MainWindow(QtWidgets.QMainWindow):
             hook_paths=hook_paths,
         )
 
+    def _retained_usd_helper_path(self) -> Path:
+        config = getattr(self, "config", None)
+        if config is not None:
+            hook_script_path = getattr(config, "hook_script_path", None)
+            if callable(hook_script_path):
+                try:
+                    return Path(hook_script_path("hsrm_retained_usd_paths"))
+                except Exception as exc:
+                    _log_suppressed_exception("MainWindow._retained_usd_helper_path", exc)
+        return get_appdata_dir() / "hooks" / "hsrm_retained_usd_paths.py"
+
     def _build_render_environment(self, job: RenderJob) -> dict[str, str]:
         mode = self._effective_device_mode_for_job(job)
         selection = self._effective_device_selection_for_job(job)
@@ -2101,7 +2167,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "HSRM_DEVICE_INCLUDE_CPU": "1" if cpu_selected else "0",
             "HSRM_RENDER_ALL_FRAMES_SINGLE_PROCESS": "1" if single_process_render else "0",
             "HSRM_RETAIN_USD_ENABLED": "1" if retain_usd_enabled else "0",
-            "HSRM_RETAIN_USD_HELPER_PATH": str(self.config.hook_script_path("hsrm_retained_usd_paths")),
+            "HSRM_RETAIN_USD_HELPER_PATH": str(self._retained_usd_helper_path()),
         }
         if retain_usd_enabled:
             planned_build_range = self._current_retained_usd_build_range(job)
@@ -2319,7 +2385,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _is_absolute_retained_usd_path(path_text: str) -> bool:
         try:
             return bool(path_text) and Path(path_text).is_absolute()
-        except Exception:
+        except (TypeError, ValueError, OSError):
             return False
 
     @staticmethod
@@ -2480,7 +2546,7 @@ class MainWindow(QtWidgets.QMainWindow):
         step = int(job.runtime.retained_usd_build_step)
         try:
             hip_mtime = Path(job.spec.hip_path).stat().st_mtime if str(job.spec.hip_path or "").strip() else None
-        except Exception:
+        except OSError:
             hip_mtime = None
         payload = {
             "version": 1,
@@ -2494,7 +2560,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }
         try:
             write_json_atomic(self._retained_usd_metadata_path(retained_usd_path), payload)
-        except Exception as exc:
+        except (OSError, TypeError, ValueError) as exc:
             self._append_log("Stderr", f"[RetainUSD] Failed to write metadata sidecar: {exc}\n")
 
     @staticmethod
@@ -2537,7 +2603,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return ""
         try:
             current_hip_mtime = Path(hip_path).stat().st_mtime
-        except Exception:
+        except OSError:
             return ""
         try:
             built_hip_mtime_value = float(built_hip_mtime)
@@ -2601,7 +2667,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         try:
             folder = Path(retained_path).resolve().parent
-        except Exception:
+        except (OSError, RuntimeError):
             folder = Path(retained_path).parent
         if not folder.exists():
             self._clear_retained_usd_runtime(job)
@@ -2609,7 +2675,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             import shutil
             shutil.rmtree(folder, ignore_errors=False)
-        except Exception as exc:
+        except OSError as exc:
             self._append_log("Stderr", f"[RetainUSD] Failed to delete previous USD folder before rebuild: {folder} ({exc})\n")
             return False
         self._clear_retained_usd_runtime(job)
@@ -2852,7 +2918,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 import shutil
                 shutil.rmtree(folder, ignore_errors=False)
                 deleted_any = True
-            except Exception as exc:
+            except OSError as exc:
                 safe_message(self, "Retained USD", f"Failed to delete retained USD folder:\n{folder}", str(exc))
                 return
         if not deleted_any:
@@ -2865,7 +2931,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
             try:
                 resolved_dir = Path(retained_path).resolve().parent
-            except Exception:
+            except (OSError, RuntimeError):
                 resolved_dir = Path(retained_path).parent
             if resolved_dir in target_dirs:
                 self._clear_retained_usd_runtime(job)
@@ -3345,8 +3411,7 @@ class MainWindow(QtWidgets.QMainWindow):
             safe_message(self, "Tree Edit Error", f"Failed to apply tree edit: {exc}", traceback.format_exc())
             self._defer_refresh_queue_tree_view()
 
-    @staticmethod
-    def _job_can_reset_cached_cell(job: RenderJob, col: int) -> bool:
+    def _job_can_reset_cached_cell(self, job: RenderJob, col: int) -> bool:
         cached_start = job.runtime.rop_default_start_frame
         cached_end = job.runtime.rop_default_end_frame
         cached_step = job.runtime.rop_default_step
@@ -3384,7 +3449,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 and int(job.spec.end_frame) == int(float(cached_end))
             )
             matches_step = int(job.spec.step) == int(float(cached_step))
-        except Exception:
+        except (TypeError, ValueError):
             return
         if matches_range and matches_step:
             job.spec.frame_range_mode = "use_rop"
@@ -3412,7 +3477,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 try:
                     rs = int(float(cached_start))
                     re = int(float(cached_end))
-                except Exception:
+                except (TypeError, ValueError):
                     continue
                 if target.frame_range_mode == "use_rop":
                     continue
@@ -3422,7 +3487,7 @@ class MainWindow(QtWidgets.QMainWindow):
             elif col == 4:
                 try:
                     rstep = int(float(cached_step))
-                except Exception:
+                except (TypeError, ValueError):
                     continue
                 if target.frame_range_mode == "use_rop":
                     continue
@@ -3773,7 +3838,7 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 exists = expected.exists()
                 size_ok = expected.stat().st_size > 0 if exists else False
-            except Exception:
+            except OSError:
                 exists = False
                 size_ok = False
             if exists and size_ok and first_missing is None:
@@ -3856,7 +3921,7 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 exists = expected.exists()
                 size_ok = expected.stat().st_size > 0 if exists else False
-            except Exception:
+            except OSError:
                 exists = False
                 size_ok = False
             if exists and size_ok:
@@ -4046,9 +4111,28 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self._set_current_queue_file_path(target_path)
             return True
-        except Exception as exc:
+        except (OSError, TypeError, ValueError) as exc:
             self._append_log("Stderr", f"[Queue] Failed to save queue: {exc}\n")
             return False
+
+    def _write_queue_snapshot(self, reason: str, *, max_files: int = 5) -> bool:
+        try:
+            write_queue_snapshot_model(
+                base_dir=self.config.base_dir,
+                reason=reason,
+                jobs=self.jobs,
+                queue_view=self._queue_view_to_persisted_dict(),
+                active_job_id=self.current_job_id,
+                save_queue_payload_fn=save_queue_payload,
+                max_files=max_files,
+            )
+            return True
+        except (OSError, TypeError, ValueError) as exc:
+            self._append_log("Stderr", f"[Queue] Failed to write queue snapshot ({reason}): {exc}\n")
+            return False
+
+    def _build_queue_run_summary(self, started_job_ids: set[str]) -> tuple[str, str] | None:
+        return build_queue_run_summary_model(self.jobs, started_job_ids)
 
     def _load_persisted_queue(self) -> None:
         path = self._current_queue_file_path()
@@ -4445,113 +4529,57 @@ class MainWindow(QtWidgets.QMainWindow):
         self._append_notifications(source, text)
 
     def _append_notification_message(self, message: str, severity: str = "info") -> None:
-        if not message:
+        self._push_notification_item(message, severity, dedupe_consecutive=True)
+
+    def _push_notification_item(self, message: str, severity: str, *, dedupe_consecutive: bool) -> bool:
+        text = str(message or "").strip()
+        if not text:
+            return False
+        list_widget = getattr(self, "notifications_list", None)
+        if list_widget is None:
+            return False
+        sev = str(severity or "info").lower()
+        signature = (text, sev)
+        if dedupe_consecutive and self._last_notification_signature == signature:
+            return False
+        item = QtWidgets.QListWidgetItem(text)
+        item.setIcon(self._notification_icon_for_severity(sev))
+        item.setForeground(QtGui.QBrush(self._notification_color_for_severity(sev)))
+        list_widget.addItem(item)
+        self._last_notification_signature = signature
+        self._trim_notifications_list(max_items=250)
+        return True
+
+    def _trim_notifications_list(self, *, max_items: int) -> None:
+        list_widget = getattr(self, "notifications_list", None)
+        if list_widget is None:
             return
-        if not hasattr(self, "notifications_list") or self.notifications_list is None:
-            return
-        item = QtWidgets.QListWidgetItem(str(message))
-        item.setIcon(self._notification_icon_for_severity(severity))
-        item.setForeground(QtGui.QBrush(self._notification_color_for_severity(severity)))
-        self.notifications_list.addItem(item)
-        max_items = 250
-        while self.notifications_list.count() > max_items:
-            self.notifications_list.takeItem(0)
-        if self.notifications_list.count() > 0:
-            self.notifications_list.scrollToBottom()
+        while list_widget.count() > max_items:
+            list_widget.takeItem(0)
+        if list_widget.count() > 0:
+            list_widget.scrollToBottom()
 
     def _append_notifications(self, source: str, text: str) -> None:
-        if not hasattr(self, "notifications_list") or self.notifications_list is None:
+        list_widget = getattr(self, "notifications_list", None)
+        if list_widget is None:
             return
-        source_label = str(source or "").strip() or "Info"
         added = False
-        for message, severity in self._notification_messages_for_log(source_label, text):
-            item = QtWidgets.QListWidgetItem(message)
-            item.setIcon(self._notification_icon_for_severity(severity))
-            item.setForeground(QtGui.QBrush(self._notification_color_for_severity(severity)))
-            self.notifications_list.addItem(item)
-            added = True
+        for message, severity in self._notification_messages_for_log(source, text):
+            if self._push_notification_item(message, severity, dedupe_consecutive=True):
+                added = True
         if not added:
             return
-        max_items = 250
-        while self.notifications_list.count() > max_items:
-            self.notifications_list.takeItem(0)
-        if self.notifications_list.count() > 0:
-            self.notifications_list.scrollToBottom()
 
     def _notification_messages_for_log(self, source: str, text: str) -> list[tuple[str, str]]:
-        messages: list[tuple[str, str]] = []
-        for raw_line in str(text or "").splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            if line.startswith("[Recovery] "):
-                continue
-            summary = self._notification_summary_for_line(source, line)
-            if summary is not None:
-                messages.append(summary)
-        return messages
+        return notification_messages_for_log_model(source, text)
 
     @staticmethod
     def _notification_summary_for_line(source: str, line: str) -> tuple[str, str] | None:
-        low = line.lower()
-        if line.startswith("===") and line.endswith("==="):
-            inner = line.strip("=").strip()
-            inner_low = inner.lower()
-            if inner_low == "queue started":
-                return ("Queue started.", "info")
-            if inner_low == "queue complete":
-                return ("Queue complete.", "info")
-            if inner_low == "queue stopped":
-                return ("Queue stopped.", "warning")
-            if inner_low == "queue aborted":
-                return ("Queue aborted.", "error")
-            if inner_low.startswith("render start:"):
-                job_name = inner.split(":", 1)[1].strip() if ":" in inner else inner
-                return (f"Started render: {job_name}", "info")
-            return None
-        if line.startswith("[Queue] Stop requested"):
-            return ("Stopping queue after the current step.", "warning")
-        if line.startswith("[Queue] Terminating current render process"):
-            return ("Stopping the active render.", "warning")
-        if line.startswith("[Queue] Force killing current render process"):
-            return ("Force-stopped the active render.", "error")
-        if line.startswith("[Queue] Resumed"):
-            return ("Queue resumed.", "info")
-        if line.startswith("[Queue] Pause requested"):
-            return ("Queue will pause after the current job.", "warning")
-        if line.startswith("[Scan] No likely render/output nodes matched"):
-            return ("No likely render nodes were found. Showing all scanned nodes.", "warning")
-        if line.startswith("[Retry] "):
-            return ("Retrying the current render chunk after a worker failure.", "warning")
-        if line.startswith("[Preflight] Failed"):
-            return ("Render preflight failed.", "error")
-        if line.startswith("[Queue] Failed to save queue"):
-            return ("Failed to save the queue file.", "error")
-        if line.startswith("[Queue] Failed to load queue"):
-            return ("Failed to load the queue file.", "error")
-        if line.startswith("[Queue] Failed to start render worker"):
-            return ("Failed to start the render worker.", "error")
-        if line.startswith("[Log] Failed to open log file"):
-            return ("Failed to open the job log file.", "error")
-        if "unresponsive" in low and "worker" in low:
-            if "render worker" in low:
-                return ("The render worker stopped responding.", "error")
-            if "scan worker" in low:
-                return ("The scan worker stopped responding.", "error")
-            return ("A worker process stopped responding.", "error")
-        if "worker exited unexpectedly" in low:
-            if "render worker" in low:
-                return ("The render worker exited unexpectedly.", "error")
-            if "scan worker" in low:
-                return ("The scan worker exited unexpectedly.", "error")
-            return ("A worker process exited unexpectedly.", "error")
-        if source.lower() == "stderr" and any(token in low for token in ("traceback", "error", "failed", "interrupted")):
-            if "interrupted" in low:
-                return ("A render was interrupted.", "warning")
-            if "traceback" in low:
-                return ("A technical error was reported. See Logs for details.", "error")
-            return ("An error was reported. See Logs for details.", "error")
-        return None
+        return notification_summary_for_line_model(source, line)
+
+    @staticmethod
+    def _classified_render_error_notification(low: str) -> tuple[str, str] | None:
+        return classified_render_error_notification_model(low)
 
     def _notification_icon_for_severity(self, severity: str) -> QtGui.QIcon:
         style = self.style()
@@ -4594,8 +4622,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_output.clear()
 
     def _clear_notifications_view_only(self) -> None:
-        if hasattr(self, "notifications_list") and self.notifications_list is not None:
-            self.notifications_list.clear()
+        list_widget = getattr(self, "notifications_list", None)
+        if list_widget is not None:
+            list_widget.clear()
+        self._last_notification_signature = None
 
     def _build_diagnostics_snapshot(self) -> DiagnosticsSnapshot:
         status_text = ""
@@ -4635,7 +4665,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         try:
             return max(0, min(100, int(m.group(1))))
-        except Exception:
+        except ValueError:
             return None
 
     def _queue_progress_split_values(self, job: RenderJob) -> tuple[int | None, int | None]:
@@ -4681,7 +4711,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for v in raw:
             try:
                 i = int(v)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if 0 <= i < self.queue_table.columnCount():
                 result.add(i)
@@ -4695,7 +4725,7 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 logical = int(key)
                 width = int(value)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if 0 <= logical < self.queue_table.columnCount() and width > 8:
                 result[logical] = width
@@ -5030,36 +5060,55 @@ class MainWindow(QtWidgets.QMainWindow):
                 return True
         return False
 
+    def _queue_lifecycle_state(self) -> QueueLifecycleState:
+        return QueueLifecycleState(
+            queue_active=bool(self.queue_active),
+            queue_paused=bool(self.queue_paused),
+            stop_requested=bool(self.stop_requested),
+            canceling_current_job=bool(self.canceling_current_job),
+            current_job_id=self.current_job_id,
+            active_hbatch_pid=int(self._active_hbatch_pid or 0),
+            queue_rerun_statuses=set(self._queue_rerun_statuses),
+            jobs_started_this_run=set(self._jobs_started_this_run),
+            queue_next_search_index=int(self._queue_next_search_index),
+        )
+
+    def _apply_queue_lifecycle_state(self, state: QueueLifecycleState) -> None:
+        self.queue_active = bool(state.queue_active)
+        self.queue_paused = bool(state.queue_paused)
+        self.stop_requested = bool(state.stop_requested)
+        self.canceling_current_job = bool(state.canceling_current_job)
+        self.current_job_id = state.current_job_id
+        self._active_hbatch_pid = int(state.active_hbatch_pid)
+        self._queue_rerun_statuses = set(state.queue_rerun_statuses)
+        self._jobs_started_this_run = set(state.jobs_started_this_run)
+        self._queue_next_search_index = int(state.queue_next_search_index)
+
     def _start_queue(self) -> None:
         selected = self._selected_job()
         can_start_selected = self._is_job_runnable(selected)
         has_runnable = any(self._is_job_runnable(job) for job in self.jobs)
-        start_decision = can_start_queue(
-            queue_active=self.queue_active,
-            queue_paused=self.queue_paused,
+        start_decision = evaluate_start_request_model(
+            self._queue_lifecycle_state(),
             hbatch_exists=self._hbatch_exists(),
             has_runnable=has_runnable,
             can_start_selected=can_start_selected,
         )
         if self.queue_active:
-            if self.queue_paused:
-                self.queue_paused = False
+            if self.queue_paused and start_decision.resume_existing:
+                self._apply_queue_lifecycle_state(with_queue_resumed_model(self._queue_lifecycle_state()))
                 self._append_log("Stdout", "\n[Queue] Resumed\n")
                 self._set_status_message("Queue resumed", 3000)
                 self._maybe_start_next_job()
                 self._refresh_ui_state()
             return
-        if not start_decision.allowed:
-            title = "hbatch Missing" if "hbatch" in start_decision.reason.lower() else "Queue Empty"
-            safe_message(self, title, start_decision.reason)
+        if not bool(start_decision.allowed):
+            reason = str(start_decision.reason or "")
+            title = "hbatch Missing" if "hbatch" in reason.lower() else "Queue Empty"
+            safe_message(self, title, reason)
             return
-        self.queue_active = True
-        self.queue_paused = False
-        self.stop_requested = False
-        self.canceling_current_job = False
-        self._queue_rerun_statuses = set()
-        self._jobs_started_this_run = set()
-        self._queue_next_search_index = 0
+        self._write_queue_snapshot("before_start")
+        self._apply_queue_lifecycle_state(with_queue_started_model(self._queue_lifecycle_state()))
         self._append_log("Stdout", "\n=== Queue Started ===\n")
         self._set_status_message("Queue started")
         self._refresh_ui_state()
@@ -5073,7 +5122,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _toggle_pause(self) -> None:
         if not self.queue_active:
             return
-        self.queue_paused = not self.queue_paused
+        self._apply_queue_lifecycle_state(with_pause_toggled_model(self._queue_lifecycle_state()))
         if self.queue_paused:
             self._append_log("Stdout", "\n[Queue] Pause requested (takes effect between jobs)\n")
             self._set_status_message("Queue will pause after current job")
@@ -5086,12 +5135,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _stop_queue(self) -> None:
         if not self.queue_active and not self._render_job_active():
             return
-        self.stop_requested = True
-        self.queue_paused = False
+        self._apply_queue_lifecycle_state(
+            with_stop_requested_model(self._queue_lifecycle_state(), render_job_active=self._render_job_active())
+        )
         self._append_log("Stdout", "\n[Queue] Stop requested\n")
         self._set_status_message("Stopping queue...")
         if self._render_job_active():
-            self.canceling_current_job = True
             self._append_log("Stdout", "[Queue] Terminating current render process...\n")
             self._send_render_worker_request("render.stop", {}, request_id=self._active_render_request_id or uuid4().hex)
             self._ensure_kill_timer()
@@ -5112,21 +5161,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self._send_render_worker_request("render.kill", {}, request_id=self._active_render_request_id or uuid4().hex)
 
     def _maybe_start_next_job(self) -> None:
-        if not self.queue_active or self.queue_paused or self._render_job_active():
-            return
-        if self.stop_requested:
-            self._finish_queue("Queue stopped")
-            return
-        next_job = select_next_runnable_job(
-            self.jobs,
-            start_index=self._queue_next_search_index,
+        decision = decide_next_job_model(
+            self._queue_lifecycle_state(),
+            jobs=self.jobs,
+            render_job_active=self._render_job_active(),
             is_runnable=self._is_job_runnable,
-            started_job_ids=self._jobs_started_this_run,
         )
-        if next_job is None:
-            self._finish_queue("Queue complete")
+        if decision.finish_message:
+            self._finish_queue(decision.finish_message)
             return
-        self._start_job(next_job)
+        if decision.job is None:
+            return
+        self._start_job(decision.job)
 
     def _start_job(self, job: RenderJob) -> None:
         if not self._hbatch_exists():
@@ -5139,105 +5185,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_queue_table(select_job_id=job.id)
             self._maybe_start_next_job()
             return
-
-        self._clear_job_resume_runtime_state(job)
-        frame_plan = plan_frame_handling_model(
-            job,
-            overwrite_mode=FrameHandlingMode.OVERWRITE,
-            render_missing_mode=FrameHandlingMode.RENDER_MISSING,
-            render_from_first_missing_mode=FrameHandlingMode.RENDER_FROM_FIRST_MISSING,
-            compute_resume_from_output=lambda target: self._compute_resume_from_output(target, interactive=False),
-            compute_missing_ranges_from_output=lambda target: self._compute_missing_ranges_from_output(target, interactive=False),
-        )
-        baseline_done = int(frame_plan.baseline_done)
-        forced_ranges = frame_plan.forced_ranges
-        if frame_plan.info_message:
-            self._append_log("Stdout", frame_plan.info_message)
-        if frame_plan.already_complete:
-            mark_job_done_without_render_model(job, done_status=JobStatus.DONE, now_fn=datetime.now)
-            self._save_queue_state()
-            self._refresh_queue_table(select_job_id=job.id)
-            self._maybe_start_next_job()
-            return
-
-        # Build runtime chunk plan after frame-handling planning.
-        self._initialize_job_chunk_runtime(job, forced_ranges=forced_ranges)
-        if not job.runtime.chunk_ranges_runtime and self._chunking_enabled():
-            # Fall back to non-chunked execution if range resolution failed.
-            job.runtime.chunk_retry_count_runtime = self._retry_count_value()
-        build_range = self._current_retained_usd_build_range(job)
-        if build_range is not None:
-            job.runtime.retained_usd_build_start_frame = int(build_range[0])
-            job.runtime.retained_usd_build_end_frame = int(build_range[1])
-            job.runtime.retained_usd_build_step = int(build_range[2])
-        else:
-            job.runtime.retained_usd_build_start_frame = None
-            job.runtime.retained_usd_build_end_frame = None
-            job.runtime.retained_usd_build_step = None
-
-        resume_baseline = int(max(0, baseline_done))
-
-        job.runtime.status = JobStatus.RUNNING
-        job.runtime.started_at = datetime.now()
-        job.runtime.finished_at = None
-        job.runtime.exit_code = None
-        job.runtime.error_summary = ""
-        job.runtime.offline_detected_reason = ""
-        self._reset_job_process_attempt_state(job)
-        job.runtime.runtime_start_frame = None
-        job.runtime.runtime_end_frame = None
-        job.runtime.runtime_step = None
-        # Keep the last known output path visible until a newer one is detected.
-        job.runtime.resume_completed_baseline_count = resume_baseline
-        self._cancel_phase_promote()
-        self.current_job_id = job.id
-        self.canceling_current_job = False
-        self._jobs_started_this_run.add(job.id)
-        try:
-            self._queue_next_search_index = self.jobs.index(job) + 1
-        except ValueError:
-            self._queue_next_search_index = 0
-
-        try:
-            Path(job.runtime.log_file_path).parent.mkdir(parents=True, exist_ok=True)
-            self.current_job_log_handle = open(job.runtime.log_file_path, "a", encoding="utf-8", errors="replace")
-        except Exception as exc:
-            self.current_job_log_handle = None
-            self._append_log("Stderr", f"[Log] Failed to open log file: {exc}\n")
-
-        self._write_job_log(f"=== Job Started: {job.display_name()} ===\n")
-        self._write_job_log(f"HIP: {job.spec.hip_path}\nROP: {job.spec.rop_path}\nFrames: {job.frame_display()}\n")
-        if job.runtime.chunk_total_runtime > 1:
-            self._write_job_log(
-                f"[Chunking] {job.runtime.chunk_total_runtime} chunks | retries={job.runtime.chunk_retry_count_runtime} | delay={self._retry_delay_value()}s\n"
-            )
-        if resume_baseline > 0:
-            self._write_job_log(f"[Frame Handling] Existing frames baseline: {resume_baseline}\n")
-
-        self._append_log("Stdout", f"\n=== Render Start: {job.display_name()} ===\n")
-        if job.runtime.chunk_total_runtime > 1:
-            self._append_log(
-                "Stdout",
-                f"[Chunk] {job.runtime.chunk_index_runtime + 1}/{job.runtime.chunk_total_runtime} | frames {job.runtime.chunk_start_frame_runtime}-{job.runtime.chunk_end_frame_runtime} | attempt {job.runtime.chunk_attempt_runtime}/{1 + max(0, job.runtime.chunk_retry_count_runtime)}\n",
-            )
-        payload = self.render_session.build_render_worker_payload(job)
-        if payload is None or not self._start_render_worker_payload(payload):
-            self._append_log("Stderr", "[Queue] Failed to start render worker.\n")
-            job.runtime.status = JobStatus.FAILED
-            job.runtime.exit_code = -1
-            job.runtime.finished_at = datetime.now()
-            job.runtime.error_summary = "Failed to start render worker."
-            self._close_current_job_log()
-            self.current_job_id = None
-            self._refresh_queue_table(select_job_id=job.id)
-            self._maybe_start_next_job()
-            return
-
-        self._refresh_queue_table(select_job_id=job.id)
-        self._set_status_message(f"Running: {job.display_name()}")
-
-    def _send_render_commands(self) -> None:
-        return
+        start_job_runtime_model(self, job)
 
     def _ensure_husk_hook_files(self) -> dict[str, str]:
         try:
@@ -5259,89 +5207,13 @@ class MainWindow(QtWidgets.QMainWindow):
         return None
 
     def _handle_render_worker_message(self, message: dict[str, Any]) -> None:
-        request_id = str(message.get("request_id", "") or "")
-        if request_id and self._active_render_request_id and request_id != self._active_render_request_id:
-            return
-        payload = dict(message.get("payload", {}) or {})
-        message_type = str(message.get("type", "") or "")
-        if message_type == "render.started":
-            self._render_finished_message_received = False
-            try:
-                self._active_hbatch_pid = int(payload.get("pid", 0) or 0)
-            except Exception:
-                self._active_hbatch_pid = 0
-            return
-        if message_type == "render.output":
-            text = str(payload.get("text", "") or "")
-            stream = str(payload.get("stream", "stdout") or "stdout")
-            if not text:
-                return
-            self._append_log("Stderr" if stream == "stderr" else "Stdout", text)
-            self._write_job_log(text)
-            self._update_job_progress_from_output(text)
-            return
-        if message_type == "render.finished":
-            self._render_finished_message_received = True
-            self._active_render_request_id = ""
-            normal_exit_value = int(
-                getattr(QtCore.QProcess.ExitStatus.NormalExit, "value", QtCore.QProcess.ExitStatus.NormalExit)
-            )
-            self._on_render_finished(
-                int(payload.get("exit_code", -1)),
-                QtCore.QProcess.ExitStatus(int(payload.get("exit_status", normal_exit_value))),
-            )
-            return
-        if message_type == "render.crashed":
-            reason = str(payload.get("reason", "") or "Render worker reported a crash.")
-            process_error = payload.get("process_error")
-            suffix = f" ({process_error})" if process_error not in (None, "") else ""
-            self._handle_render_worker_crash(f"{reason}{suffix}")
+        handle_render_worker_message_model(self, message)
 
     def _handle_render_worker_crash(self, reason: str) -> None:
-        if self._pending_kill_timer is not None:
-            self._pending_kill_timer.stop()
-        self._kill_active_hbatch_tree()
-        job = self._current_job()
-        if job is None:
-            return
-        crash_result = self.render_session.handle_worker_crash(
-            job,
-            reason,
-            canceling_current_job=self.canceling_current_job,
-            stop_requested=self.stop_requested,
-            retry_delay_value=self._retry_delay_value(),
-        )
-        if crash_result.terminal_finish:
-            if not self.canceling_current_job and not self.stop_requested:
-                self.render_session.finalize_worker_crash(job, reason)
-                finished_job_id = job.id
-                try:
-                    self._queue_next_search_index = self.jobs.index(job) + 1
-                except ValueError:
-                    self._queue_next_search_index = 0
-                self.current_job_id = None
-                self._active_hbatch_pid = 0
-                self.canceling_current_job = False
-                self._close_current_job_log()
-                self._save_queue_state()
-                self._refresh_queue_table(select_job_id=finished_job_id)
-                self._maybe_start_next_job()
-                return
-            self._on_render_finished(-1, QtCore.QProcess.ExitStatus.CrashExit)
-            return
-        if crash_result.retry_scheduled:
-            self._reset_job_process_attempt_state(job)
-            if crash_result.delay_ms > 0:
-                QtCore.QTimer.singleShot(crash_result.delay_ms, lambda j=job: self._start_job_process_continuation(j))
-            else:
-                self._start_job_process_continuation(job)
-        return
+        handle_render_worker_crash_model(self, reason)
 
     def _update_job_progress_from_output(self, text: str) -> None:
-        job = self._current_job()
-        if job is None:
-            return
-        self.render_session.handle_worker_output(job, text)
+        update_job_progress_from_output_model(self, text)
 
     @staticmethod
     def _total_frames_for_job(job: RenderJob) -> int | None:
@@ -5433,70 +5305,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_job_row(job.id)
 
     def _on_render_finished(self, exit_code: int, exit_status: QtCore.QProcess.ExitStatus) -> None:
-        if self._pending_kill_timer is not None:
-            self._pending_kill_timer.stop()
-        self._active_hbatch_pid = 0
-        job = self._current_job()
-        if job is None:
-            return
-
-        was_canceled = bool(self.canceling_current_job or self.stop_requested)
-        finish_result = self.render_session.handle_render_finished(
-            job,
-            exit_code,
-            exit_status,
-            was_canceled=was_canceled,
-            advance_job_to_next_chunk=self._advance_job_to_next_chunk,
-            retry_delay_value=self._retry_delay_value(),
-        )
-        self._active_render_request_id = ""
-        if finish_result.continue_next_chunk:
-            self._reset_job_process_attempt_state(job)
-            self._start_job_process_continuation(job)
-            return
-        if finish_result.retry_current_chunk:
-            self._reset_job_process_attempt_state(job)
-            if finish_result.delay_ms > 0:
-                QtCore.QTimer.singleShot(finish_result.delay_ms, lambda j=job: self._start_job_process_continuation(j))
-            else:
-                self._start_job_process_continuation(job)
-            return
-        self._clear_job_resume_runtime_state(job)
-        job.runtime.chunk_start_frame_runtime = None
-        job.runtime.chunk_end_frame_runtime = None
-        job.runtime.chunk_step_runtime = None
-        job.runtime.chunk_ranges_runtime.clear()
-        job.runtime.chunk_index_runtime = 0
-        job.runtime.chunk_total_runtime = 0
-        job.runtime.chunk_attempt_runtime = 0
-        finished_job_id = job.id
-        try:
-            self._queue_next_search_index = self.jobs.index(job) + 1
-        except ValueError:
-            self._queue_next_search_index = 0
-        self.current_job_id = None
-        self.canceling_current_job = False
-
-        if self.stop_requested:
-            self._save_queue_state()
-            self._finish_queue("Queue stopped")
-        else:
-            self._save_queue_state()
-            self._refresh_queue_table(select_job_id=finished_job_id)
-            self._maybe_start_next_job()
+        on_render_finished_model(self, exit_code, exit_status)
 
     def _finish_queue(self, message: str) -> None:
-        self.queue_active = False
-        self.queue_paused = False
-        self.stop_requested = False
-        self.current_job_id = None
-        self._active_hbatch_pid = 0
-        self.canceling_current_job = False
-        self._queue_rerun_statuses = set()
-        self._jobs_started_this_run = set()
-        self._queue_next_search_index = 0
+        new_state, started_job_ids = with_queue_finished_model(self._queue_lifecycle_state())
+        self._apply_queue_lifecycle_state(new_state)
         self._set_status_message(message, 5000)
         self._append_log("Stdout", f"\n=== {message} ===\n")
+        summary = self._build_queue_run_summary(started_job_ids)
+        if summary is not None:
+            msg, severity = summary
+            self._append_notification_message(msg, severity)
         self._refresh_queue_table()
 
     def _kill_process_tree_by_pid(self, pid: int) -> bool:
@@ -5511,7 +5330,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 check=False,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             return False
         output = f"{result.stdout}\n{result.stderr}".lower()
         return result.returncode == 0 or "not found" in output or "no running instance" in output
@@ -5530,15 +5349,15 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.current_job_log_handle is not None:
                 self.current_job_log_handle.write(text)
                 self.current_job_log_handle.flush()
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_suppressed_exception("MainWindow._write_job_log", exc)
 
     def _close_current_job_log(self) -> None:
         try:
             if self.current_job_log_handle is not None:
                 self.current_job_log_handle.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_suppressed_exception("MainWindow._close_current_job_log", exc)
         self.current_job_log_handle = None
 
     def _open_selected_job_log(self) -> None:
@@ -5591,7 +5410,7 @@ class MainWindow(QtWidgets.QMainWindow):
         assert preview_path is not None
         try:
             started = QtCore.QProcess.startDetached(str(player), [str(preview_path)])
-        except Exception as exc:
+        except (RuntimeError, TypeError) as exc:
             safe_message(self, "Preview", f"Failed to launch preview player:\n{player}", str(exc))
             return
         if not started:
@@ -5601,7 +5420,7 @@ class MainWindow(QtWidgets.QMainWindow):
         folder = self.config.logs_dir
         try:
             folder.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:
+        except OSError as exc:
             decision = validate_logs_folder_access(folder_ready=False, create_failed=True)
             safe_message(self, decision.title or "Logs Folder", f"{decision.message}\n{folder}", str(exc))
             return
@@ -5618,7 +5437,7 @@ class MainWindow(QtWidgets.QMainWindow):
         logs_dir = self.config.logs_dir
         try:
             logs_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:
+        except OSError as exc:
             decision = validate_logs_folder_access(folder_ready=False, create_failed=False)
             safe_message(self, decision.title or "Logs Folder", f"{decision.message}\n{logs_dir}", str(exc))
             return
@@ -5644,7 +5463,7 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 path.unlink()
                 deleted += 1
-            except Exception as exc:
+            except OSError as exc:
                 failed.append(f"{path.name}: {exc}")
 
         if failed:
@@ -5723,6 +5542,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not target_jobs:
             self._set_status_message("No jobs to reload from file.", 3000)
             return
+        self._write_queue_snapshot("before_reload_all")
         self._defer_reload_jobs_from_file(
             target_jobs,
             reset_override_to_rop=False,
@@ -5773,8 +5593,8 @@ def install_excepthook() -> None:
         msg = "".join(traceback.format_exception(exc_type, exc, tb))
         try:
             QtWidgets.QMessageBox.critical(None, "Unhandled Error", msg)
-        except Exception:
-            pass
+        except Exception as msgbox_exc:
+            _log_suppressed_exception("install_excepthook._hook.messagebox", msgbox_exc)
         sys.__excepthook__(exc_type, exc, tb)
 
     sys.excepthook = _hook

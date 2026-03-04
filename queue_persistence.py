@@ -13,7 +13,7 @@ def _optional_int(value: Any) -> int | None:
         return None
     try:
         return int(value)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
@@ -88,7 +88,7 @@ def job_from_persisted_dict(data: dict[str, Any], *, active_job_id: str | None =
         status_text = str(data.get("status", JobStatus.QUEUED.value))
         try:
             status = JobStatus(status_text)
-        except Exception:
+        except ValueError:
             status = JobStatus.QUEUED
         raw_id = str(data.get("id", "") or "").strip()
         persisted_allframes = data.get("render_all_frames_single_process")
@@ -176,7 +176,7 @@ def job_from_persisted_dict(data: dict[str, Any], *, active_job_id: str | None =
         if isinstance(prev_offline, str) and prev_offline.strip():
             try:
                 job.runtime.offline_previous_status = JobStatus(prev_offline)
-            except Exception:
+            except ValueError:
                 job.runtime.offline_previous_status = None
         job.view.phase_text = str(data.get("phase_text", "") or "")
         if job.runtime.allframesatonce_enabled is False and job.view.phase_text == "USD Build":
@@ -201,7 +201,7 @@ def job_from_persisted_dict(data: dict[str, Any], *, active_job_id: str | None =
             if isinstance(raw, str) and raw.strip():
                 try:
                     setattr(job.runtime, attr, datetime.fromisoformat(raw))
-                except Exception:
+                except (TypeError, ValueError):
                     pass
         if job.runtime.status == JobStatus.INTERRUPTED:
             if not job.runtime.interrupted_reason:
@@ -216,7 +216,7 @@ def job_from_persisted_dict(data: dict[str, Any], *, active_job_id: str | None =
             if not job.runtime.error_summary:
                 job.runtime.error_summary = job.runtime.interrupted_reason
         return job
-    except Exception:
+    except (TypeError, ValueError, KeyError, AttributeError):
         return None
 
 

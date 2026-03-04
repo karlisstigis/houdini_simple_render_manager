@@ -24,6 +24,8 @@ class QueueTableModelHooks:
     jobs_provider: Callable[[], list[RenderJob]]
     is_active_job: Callable[[RenderJob], bool]
     job_phase_display: Callable[[RenderJob], str]
+    job_usd_status_display: Callable[[RenderJob], str]
+    job_usd_status_tooltip: Callable[[RenderJob], str]
     job_time_remaining_display: Callable[[RenderJob], str]
     job_frame_display: Callable[[RenderJob], str]
     job_started_time_display: Callable[[RenderJob], str]
@@ -47,14 +49,15 @@ class QueueTableModel(QtCore.QAbstractTableModel):
     STATUS_COLUMN = 6
     PROGRESS_COLUMN = 7
     PHASE_COLUMN = 8
-    REMAINING_COLUMN = 9
-    FRAME_COLUMN = 10
-    FRAME_TIME_COLUMN = 11
-    AVG_FRAME_TIME_COLUMN = 12
-    STARTED_COLUMN = 13
-    COMPLETED_COLUMN = 14
-    RENDER_TIME_COLUMN = 15
-    OUTPUT_COLUMN = 16
+    USD_COLUMN = 9
+    REMAINING_COLUMN = 10
+    FRAME_COLUMN = 11
+    FRAME_TIME_COLUMN = 12
+    AVG_FRAME_TIME_COLUMN = 13
+    STARTED_COLUMN = 14
+    COMPLETED_COLUMN = 15
+    RENDER_TIME_COLUMN = 16
+    OUTPUT_COLUMN = 17
 
     COLUMN_HEADERS = [
         "Name",
@@ -66,6 +69,7 @@ class QueueTableModel(QtCore.QAbstractTableModel):
         "Status",
         "Progress",
         "Phase",
+        "USD",
         "Remaining",
         "Frame",
         "Frame Time",
@@ -126,6 +130,8 @@ class QueueTableModel(QtCore.QAbstractTableModel):
             return job.view.percent_text or ""
         if column == self.PHASE_COLUMN:
             return self._hooks.job_phase_display(job)
+        if column == self.USD_COLUMN:
+            return self._hooks.job_usd_status_display(job)
         if column == self.REMAINING_COLUMN:
             return self._hooks.job_time_remaining_display(job)
         if column == self.FRAME_COLUMN:
@@ -191,6 +197,8 @@ class QueueTableModel(QtCore.QAbstractTableModel):
             if column == self.FRAME_RANGE_COLUMN:
                 return "Range matches ROP value."
             return "Step matches ROP value."
+        if column == self.USD_COLUMN:
+            return self._hooks.job_usd_status_tooltip(job)
         if column == self.NAME_COLUMN:
             return job.runtime.log_file_path or ""
         if column == self.OUTPUT_COLUMN:

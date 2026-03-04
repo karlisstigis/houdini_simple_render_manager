@@ -133,7 +133,7 @@ def advance_job_to_next_chunk(job: RenderJob) -> bool:
     chunk_start, chunk_end, chunk_step = job.runtime.chunk_ranges_runtime[job.runtime.chunk_index_runtime]
     try:
         done_count = ((int(chunk_end) - int(chunk_start)) // int(chunk_step)) + 1
-    except Exception:
+    except (TypeError, ValueError, ZeroDivisionError):
         done_count = 0
     job.runtime.resume_completed_baseline_count = int(max(0, job.runtime.resume_completed_baseline_count) + max(0, done_count))
     job.runtime.chunk_index_runtime += 1

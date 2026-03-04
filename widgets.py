@@ -7,7 +7,7 @@ from typing import Any, Callable
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from queue_models import DeviceOverrideMode, UsdOutputDirectoryMode
-from queue_table_model import PATH_SYNC_LOCKED_ROLE
+from queue_table_model import PATH_SYNC_LOCKED_ROLE, QueueTableModel
 from theme_support import DEFAULT_THEME
 
 
@@ -2505,7 +2505,7 @@ class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
         overlay = self._selection_overlay_color(opt.widget, index.row()) if selected else None
         is_offline = str(index.data(self.STATUS_ROLE) or "") == "Offline"
         is_path_sync_locked = bool(index.data(PATH_SYNC_LOCKED_ROLE))
-        if index.column() == 7:
+        if index.column() == QueueTableModel.PROGRESS_COLUMN:
             self._paint_split_progress(
                 painter,
                 opt,
@@ -2526,7 +2526,12 @@ class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
             )
             return
 
-        if index.column() not in {0, 1, 2, 16}:
+        if index.column() not in {
+            QueueTableModel.NAME_COLUMN,
+            QueueTableModel.HIP_COLUMN,
+            QueueTableModel.ROP_COLUMN,
+            QueueTableModel.OUTPUT_COLUMN,
+        }:
             super().paint(painter, opt, index)
             self._paint_selection_overlay(painter, opt.rect, overlay)
             if is_offline:
@@ -2548,7 +2553,7 @@ class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
         if text_rect.width() <= 0:
             return
         fm = opt.fontMetrics
-        elided = fm.elidedText(full_text, QtCore.Qt.TextElideMode.ElideRight, text_rect.width())
+        elided = fm.elidedText(full_text, QtCore.Qt.TextElideMode.ElideMiddle, text_rect.width())
         painter.save()
         painter.setFont(opt.font)
         painter.setPen(opt.palette.color(QtGui.QPalette.ColorRole.Text))
