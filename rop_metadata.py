@@ -11,6 +11,7 @@ from typing import Any, Callable
 class RopInfo:
     error: str | None = None
     strict_frame_range: bool | None = None
+    all_frames_single_process: bool | None = None
     runtime_start_frame: float | None = None
     runtime_end_frame: float | None = None
     runtime_step: float | None = None
@@ -34,6 +35,9 @@ def parse_probe_rop_info_output(combined: str, returncode: int | None) -> RopInf
     strict_match = re.search(r"__HSRM_TRANGE_STRICT__\|([01])", combined)
     if strict_match:
         info.strict_frame_range = strict_match.group(1) == "1"
+    allframes_match = re.search(r"__HSRM_ALLFRAMESATONCE__\|([01])", combined)
+    if allframes_match:
+        info.all_frames_single_process = allframes_match.group(1) == "1"
 
     range_match = re.search(
         r"__HSRM_RANGE__\|(-?\d+(?:\.\d+)?)\|(-?\d+(?:\.\d+)?)\|(-?\d+(?:\.\d+)?)",
@@ -60,6 +64,8 @@ def parse_probe_rop_info_output(combined: str, returncode: int | None) -> RopInf
 def rop_info_from_scan_record(record: dict[str, Any]) -> RopInfo:
     info = new_rop_info_record()
     info.strict_frame_range = bool(record.get("strict_frame_range"))
+    all_frames_value = record.get("all_frames_single_process")
+    info.all_frames_single_process = None if all_frames_value is None else bool(all_frames_value)
     info.output_path = str(record.get("output_path", "") or "").strip()
     info.runtime_start_frame = record.get("runtime_start_frame")
     info.runtime_end_frame = record.get("runtime_end_frame")
@@ -73,9 +79,12 @@ def apply_rop_info_to_job(
     normalize_output_display_path: Callable[[str], str],
     *,
     apply_runtime_range: bool = True,
+    apply_single_process_setting: bool = False,
 ) -> None:
     if info.strict_frame_range is not None:
         job.strict_frame_range = bool(info.strict_frame_range)
+    if apply_single_process_setting and info.all_frames_single_process is not None:
+        job.render_all_frames_single_process = bool(info.all_frames_single_process)
 
     out_probe = str(info.output_path or "").strip()
     if out_probe:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from queue_models import FrameHandlingMode, JobStatus, RenderJob
+from queue_models import DeviceOverrideMode, FrameHandlingMode, JobStatus, RenderJob, UsdOutputDirectoryMode
 
 
 class QueueModelTests(unittest.TestCase):
@@ -55,6 +55,19 @@ class QueueModelTests(unittest.TestCase):
         job.runtime.runtime_step = 1.0
         self.assertEqual(job.frame_range_display(), "1001-1003")
         self.assertEqual(job.step_display(), "1")
+
+    def test_device_summary_uses_defaults_and_overrides(self) -> None:
+        job = RenderJob("E:/shot/test.hip", "/out/mantra1", "use_rop")
+        self.assertEqual(job.device_summary(DeviceOverrideMode.ALL_GPUS), "Default (All GPUs)")
+        job.spec.device_override_mode = DeviceOverrideMode.SPECIFIC_GPUS
+        job.spec.device_selection = "0,1"
+        self.assertEqual(job.device_summary(DeviceOverrideMode.ALL_GPUS), "0,1")
+
+    def test_usd_output_directory_mode_defaults_to_temp(self) -> None:
+        job = RenderJob("E:/shot/test.hip", "/out/mantra1", "use_rop")
+        self.assertFalse(job.spec.render_all_frames_single_process)
+        self.assertEqual(job.spec.usd_output_directory_mode, UsdOutputDirectoryMode.DEFAULT_TEMP)
+        self.assertEqual(job.spec.usd_output_directory_custom_path, "")
 
 
 if __name__ == "__main__":

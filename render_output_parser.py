@@ -7,6 +7,13 @@ import time
 from typing import Any, Callable
 
 
+def _normalize_retained_usd_path(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text if re.match(r"^(?:[A-Za-z]:[\\/]|/)", text) else ""
+
+
 def update_job_runtime_flags_from_output(
     job: Any,
     text: str,
@@ -139,3 +146,40 @@ def update_job_from_hsrm_markers(
             if out_path:
                 job.out_file_sample_path = out_path
                 job.out_path = normalize_output_display_path(out_path)
+        elif line.startswith("__HSRM_RETAIN_USD__|"):
+            parts = line.strip().split("|")
+            if len(parts) >= 2:
+                status = parts[1].strip().lower()
+                dst_path = _normalize_retained_usd_path(parts[3].strip() if len(parts) >= 4 else "")
+                if status in {"copied", "existing"} and dst_path:
+                    job.retained_usd_path = dst_path
+                    job.retained_usd_exists = True
+                    job.retained_usd_reusable = True
+                    job.retained_usd_verified = True
+                elif status == "planned" and dst_path:
+                    job.retained_usd_path = dst_path
+                    job.retained_usd_exists = False
+                    job.retained_usd_reusable = False
+                    job.retained_usd_verified = True
+                elif status == "missing":
+                    if dst_path:
+                        job.retained_usd_path = dst_path
+                    job.retained_usd_exists = False
+                    job.retained_usd_reusable = False
+                    job.retained_usd_verified = bool(dst_path)
+                elif status == "failed":
+                    if dst_path:
+                        job.retained_usd_path = dst_path
+                    job.retained_usd_exists = False
+                    job.retained_usd_reusable = False
+                    job.retained_usd_verified = bool(dst_path)
+        elif line.startswith("[Preflight][RetainUSD] Resolved Output File -> "):
+            out_path = line.split("->", 1)[1].strip()
+            if out_path.endswith(")") and " (" in out_path:
+                out_path = out_path.rsplit(" (", 1)[0].strip()
+            out_path = _normalize_retained_usd_path(out_path)
+            if out_path:
+                job.retained_usd_path = out_path
+                job.retained_usd_exists = False
+                job.retained_usd_reusable = False
+                job.retained_usd_verified = True

@@ -48,6 +48,7 @@ class ScanCoordinatorTests(unittest.TestCase):
                         "rop_info": {
                             "error": None,
                             "strict_frame_range": True,
+                            "all_frames_single_process": True,
                             "runtime_start_frame": 1001,
                             "runtime_end_frame": 1010,
                             "runtime_step": 1,
@@ -64,8 +65,9 @@ class ScanCoordinatorTests(unittest.TestCase):
         assert info is not None
         self.assertEqual(info.runtime_start_frame, 1001)
         self.assertTrue(info.strict_frame_range)
+        self.assertTrue(info.all_frames_single_process)
 
-    def test_probe_and_apply_job_metadata_updates_job(self) -> None:
+    def test_probe_and_apply_job_metadata_updates_job_without_overwriting_single_process_setting(self) -> None:
         coordinator, _logs, _requests = self._make_coordinator(
             {
                 "scan.rop_info": {
@@ -75,6 +77,7 @@ class ScanCoordinatorTests(unittest.TestCase):
                         "rop_info": {
                             "error": None,
                             "strict_frame_range": False,
+                            "all_frames_single_process": True,
                             "runtime_start_frame": 1001,
                             "runtime_end_frame": 1010,
                             "runtime_step": 1,
@@ -87,9 +90,37 @@ class ScanCoordinatorTests(unittest.TestCase):
             }
         )
         job = RenderJob(hip_path="E:/shot/test.hip", rop_path="/out/mantra1", frame_range_mode="use_rop")
+        job.spec.render_all_frames_single_process = False
         coordinator.probe_and_apply_job_rop_metadata(job)
         self.assertEqual(job.runtime.runtime_start_frame, 1001)
         self.assertEqual(job.view.out_file_sample_path, "E:/renders/test.$F4.exr")
+        self.assertFalse(job.spec.render_all_frames_single_process)
+
+    def test_probe_and_apply_job_metadata_can_initialize_single_process_setting_when_requested(self) -> None:
+        coordinator, _logs, _requests = self._make_coordinator(
+            {
+                "scan.rop_info": {
+                    "type": "probe.result",
+                    "request_id": "a",
+                    "payload": {
+                        "rop_info": {
+                            "error": None,
+                            "strict_frame_range": False,
+                            "all_frames_single_process": True,
+                            "runtime_start_frame": 1001,
+                            "runtime_end_frame": 1010,
+                            "runtime_step": 1,
+                            "output_path": "E:/renders/test.$F4.exr",
+                            "returncode": 0,
+                            "combined_output": "",
+                        }
+                    },
+                }
+            }
+        )
+        job = RenderJob(hip_path="E:/shot/test.hip", rop_path="/out/mantra1", frame_range_mode="use_rop")
+        coordinator.probe_and_apply_job_rop_metadata(job, apply_single_process_setting=True)
+        self.assertTrue(job.spec.render_all_frames_single_process)
 
 
 if __name__ == "__main__":

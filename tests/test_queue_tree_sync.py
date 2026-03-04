@@ -1,85 +1,100 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
-from pathlib import Path
 
-from queue_editing import mark_job_offline, restore_job_online_status
 from queue_models import JobStatus, RenderJob
-from queue_tree_sync import apply_hip_path_change, apply_rop_path_change, propagate_rop_path_change
+from queue_tree_sync import refresh_jobs_from_rop_metadata
+from rop_metadata import RopInfo
 
 
 class QueueTreeSyncTests(unittest.TestCase):
-    def test_apply_hip_path_change_is_noop_for_same_value(self) -> None:
-        job = RenderJob(hip_path="E:/shot/test.hip", rop_path="/out/karma1", frame_range_mode="use_rop", status=JobStatus.QUEUED)
+    def test_refresh_jobs_from_rop_metadata_preserves_overrides_by_default(self) -> None:
+        job = RenderJob(
+            hip_path=__file__,
+            rop_path="/stage/CamTop",
+            frame_range_mode="override",
+            start_frame=250,
+            end_frame=255,
+            step=2,
+        )
+        job.runtime.status = JobStatus.QUEUED
+        job.runtime.runtime_start_frame = 1
+        job.runtime.runtime_end_frame = 2
+        job.runtime.runtime_step = 1
 
-        changed_jobs = apply_hip_path_change(
+        info = RopInfo(
+            strict_frame_range=False,
+            runtime_start_frame=300,
+            runtime_end_frame=320,
+            runtime_step=1,
+            output_path="D:/renders/CamTop.$F4.exr",
+        )
+        restored: list[str] = []
+
+        changed_ids = refresh_jobs_from_rop_metadata(
             [job],
-            old_hip="E:/shot/test.hip",
-            new_hip="E:/shot/test.hip",
             running_status=JobStatus.RUNNING,
+            scan_rop_info_for_hip=lambda hip_path: {"/stage/CamTop": info},
+            probe_rop_info=lambda hip_path, rop_path: None,
+            mark_job_offline=lambda target, reason: None,
+            restore_job_online_status=lambda target: restored.append(target.id),
+            clear_job_resume_runtime_state=lambda target: None,
+            normalize_output_display_path=lambda value: value,
+            reset_override_to_rop=False,
         )
 
-        self.assertEqual(changed_jobs, [])
-        self.assertEqual(job.spec.hip_path, "E:/shot/test.hip")
+        self.assertEqual(changed_ids, [job.id])
+        self.assertEqual(job.spec.frame_range_mode, "override")
+        self.assertEqual(job.spec.start_frame, 250)
+        self.assertEqual(job.spec.end_frame, 255)
+        self.assertEqual(job.spec.step, 2)
+        self.assertEqual(job.runtime.runtime_start_frame, 300)
+        self.assertEqual(job.runtime.runtime_end_frame, 320)
+        self.assertEqual(job.runtime.runtime_step, 1)
+        self.assertEqual(job.view.out_file_sample_path, "D:/renders/CamTop.$F4.exr")
+        self.assertEqual(restored, [job.id])
 
-    def test_apply_rop_path_change_updates_all_matching_jobs_before_sync(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            hip_path = str(Path(tmpdir) / "scene.hip")
-            Path(hip_path).write_text("", encoding="utf-8")
-            first = RenderJob(hip_path=hip_path, rop_path="/out/old", frame_range_mode="use_rop", status=JobStatus.QUEUED)
-            second = RenderJob(hip_path=hip_path, rop_path="/out/old", frame_range_mode="use_rop", status=JobStatus.FAILED)
-            running = RenderJob(hip_path=hip_path, rop_path="/out/old", frame_range_mode="use_rop", status=JobStatus.RUNNING)
+    def test_refresh_jobs_from_rop_metadata_can_reset_values_to_file_defaults(self) -> None:
+        job = RenderJob(
+            hip_path=__file__,
+            rop_path="/stage/CamTop",
+            frame_range_mode="override",
+            start_frame=250,
+            end_frame=255,
+            step=2,
+        )
+        job.runtime.status = JobStatus.QUEUED
+        cleared: list[str] = []
 
-            changed_jobs = apply_rop_path_change(
-                [first, second, running],
-                hip_path=hip_path,
-                old_rop="/out/old",
-                new_rop="/out/new",
-                running_status=JobStatus.RUNNING,
-            )
-
-            self.assertEqual([job.id for job in changed_jobs], [first.id, second.id])
-            self.assertEqual(first.spec.rop_path, "/out/new")
-            self.assertEqual(second.spec.rop_path, "/out/new")
-            self.assertEqual(running.spec.rop_path, "/out/old")
-
-    def test_apply_rop_path_change_is_noop_for_same_value(self) -> None:
-        job = RenderJob(hip_path="E:/shot/test.hip", rop_path="/out/karma1", frame_range_mode="use_rop", status=JobStatus.QUEUED)
-
-        changed_jobs = apply_rop_path_change(
-            [job],
-            hip_path="E:/shot/test.hip",
-            old_rop="/out/karma1",
-            new_rop="/out/karma1",
-            running_status=JobStatus.RUNNING,
+        info = RopInfo(
+            strict_frame_range=False,
+            runtime_start_frame=300,
+            runtime_end_frame=320,
+            runtime_step=1,
+            output_path="D:/renders/CamTop.$F4.exr",
         )
 
-        self.assertEqual(changed_jobs, [])
-        self.assertEqual(job.spec.rop_path, "/out/karma1")
+        changed_ids = refresh_jobs_from_rop_metadata(
+            [job],
+            running_status=JobStatus.RUNNING,
+            scan_rop_info_for_hip=lambda hip_path: {"/stage/CamTop": info},
+            probe_rop_info=lambda hip_path, rop_path: None,
+            mark_job_offline=lambda target, reason: None,
+            restore_job_online_status=lambda target: None,
+            clear_job_resume_runtime_state=lambda target: cleared.append(target.id),
+            normalize_output_display_path=lambda value: value,
+            reset_override_to_rop=True,
+        )
 
-    def test_propagate_rop_path_change_marks_job_offline_when_probe_raises(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            hip_path = str(Path(tmpdir) / "scene.hip")
-            Path(hip_path).write_text("", encoding="utf-8")
-            job = RenderJob(hip_path=hip_path, rop_path="/out/old", frame_range_mode="use_rop", status=JobStatus.QUEUED)
-
-            changed_ids = propagate_rop_path_change(
-                [job],
-                hip_path=hip_path,
-                old_rop="/out/old",
-                new_rop="/out/missing",
-                running_status=JobStatus.RUNNING,
-                probe_rop_info=lambda _hip, _rop: (_ for _ in ()).throw(RuntimeError("boom")),
-                mark_job_offline=mark_job_offline,
-                restore_job_online_status=restore_job_online_status,
-                normalize_output_display_path=lambda value: value,
-            )
-
-            self.assertEqual(changed_ids, [job.id])
-            self.assertEqual(job.spec.rop_path, "/out/missing")
-            self.assertEqual(job.runtime.status, JobStatus.OFFLINE)
-            self.assertIn("Failed to refresh ROP metadata", job.runtime.error_summary)
+        self.assertEqual(changed_ids, [job.id])
+        self.assertEqual(job.spec.frame_range_mode, "use_rop")
+        self.assertIsNone(job.spec.start_frame)
+        self.assertIsNone(job.spec.end_frame)
+        self.assertIsNone(job.spec.step)
+        self.assertEqual(job.runtime.runtime_start_frame, 300)
+        self.assertEqual(job.runtime.runtime_end_frame, 320)
+        self.assertEqual(job.runtime.runtime_step, 1)
+        self.assertEqual(cleared, [job.id])
 
 
 if __name__ == "__main__":

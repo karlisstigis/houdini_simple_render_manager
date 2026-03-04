@@ -2,6 +2,7 @@
 __pycache__/
 .vscode/
 .codex/
+.tmp/
 .tmp_test/
 .tmp_check/
 *.py[cod]

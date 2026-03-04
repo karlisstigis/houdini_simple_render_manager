@@ -53,7 +53,7 @@ from queue_editing import (
     restore_job_online_status as restore_job_online_status_model,
 )
 from queue_file_controller import QueueFileController, QueueFileControllerHooks
-from queue_models import FrameHandlingMode, JobStatus, RenderJob
+from queue_models import DeviceOverrideMode, FrameHandlingMode, JobStatus, RenderJob, UsdOutputDirectoryMode
 from queue_persistence import (
     apply_job_order as apply_job_order_model,
     apply_job_states as apply_job_states_model,
@@ -76,6 +76,7 @@ from queue_execution import (
 )
 from queue_filter_proxy import QueueFilterProxyModel, QUEUE_STATUS_FILTER_OPTIONS
 from queue_runtime_state import (
+    format_duration_short as format_duration_short_model,
     initialize_job_chunk_runtime as initialize_job_chunk_runtime_model,
     job_end_time_display as job_end_time_display_model,
     job_frame_display as job_frame_display_model,
@@ -112,10 +113,9 @@ from render_output_parser import (
 from rop_metadata import (
     RopInfo,
     apply_rop_info_to_job as apply_rop_info_to_job_model,
-    rop_info_from_scan_record as rop_info_from_scan_record_model,
 )
 from theme_support import DEFAULT_THEME, build_app_stylesheet, ensure_theme_icons, normalize_theme_colors
-from widgets import AddJobPanel, CleanStepSpinBox, PanelFrame, PreferencesDialog, QueueTableItemDelegate, QueueTableWidget
+from widgets import AddJobPanel, CleanStepSpinBox, JobPropertiesPanel, PanelFrame, PreferencesDialog, QueueTableItemDelegate, QueueTableWidget
 from worker_client import RenderWorkerClient, ScanWorkerClient
 
 
@@ -151,6 +151,11 @@ class ConfigStore:
             "default_chunk_size": 10,
             "default_retry_count": 1,
             "default_retry_delay": 5,
+            "default_device_mode": DeviceOverrideMode.DEFAULT.value,
+            "default_device_selection": "",
+            "default_retain_built_usd": False,
+            "default_usd_output_directory_mode": UsdOutputDirectoryMode.DEFAULT_TEMP.value,
+            "default_usd_output_directory_custom_path": "",
         }
         self.load()
 
@@ -397,6 +402,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 ensure_husk_hook_files=self._ensure_husk_hook_files,
                 build_render_preflight_script=self._build_render_preflight_script,
                 current_hbatch_path=self._current_hbatch_path,
+                build_render_environment=self._build_render_environment,
                 normalize_output_display_path=self._normalize_output_display_path,
                 hscript_quote=hscript_quote,
                 current_time=datetime.now,
@@ -405,6 +411,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 update_job_phase_from_output=self._update_job_phase_from_output,
                 cancel_phase_promote=self._cancel_phase_promote,
                 mark_job_offline=self._mark_job_offline,
+                sync_retained_usd_file_state=self._sync_retained_usd_file_state,
             ),
             hook_script_path_fn=self.config.hook_script_path,
             disable_husk_mplay_fn=lambda: bool(
@@ -421,6 +428,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._shortcut_duplicate.activated.connect(self._duplicate_selected_jobs)
         self._shortcut_delete = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Delete), self)
         self._shortcut_delete.activated.connect(self._remove_selected_job)
+        self._shortcut_job_properties = QtGui.QShortcut(QtGui.QKeySequence("P"), self)
+        self._shortcut_job_properties.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+        self._shortcut_job_properties.activated.connect(self._toggle_job_properties_panel)
         self._apply_theme()
         self._load_hbatch_path()
         self._validate_houdini_script_files()
@@ -610,6 +620,8 @@ class MainWindow(QtWidgets.QMainWindow):
         before_states = list(task.get("before_states", []) or [])
         undo_select_job_ids = list(task.get("undo_select_job_ids", []) or [])
         redo_select_job_ids = list(task.get("redo_select_job_ids", []) or [])
+        reset_override_to_rop = bool(task.get("reset_override_to_rop", False))
+        notification_label = str(task.get("notification_label", "") or "").strip()
         refresh_needed = False
         processed_ids: set[str] = set()
         try:
@@ -619,7 +631,7 @@ class MainWindow(QtWidgets.QMainWindow):
             for job in target_jobs:
                 by_hip.setdefault(str(job.spec.hip_path or ""), []).append(job)
             for hip_jobs in by_hip.values():
-                self._refresh_jobs_from_rop_metadata(hip_jobs, reset_override_to_rop=False)
+                self._refresh_jobs_from_rop_metadata(hip_jobs, reset_override_to_rop=reset_override_to_rop)
                 hip_job_ids = [job.id for job in hip_jobs]
                 processed_ids.update(hip_job_ids)
                 self._end_path_sync_lock(hip_job_ids)
@@ -633,6 +645,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 }
             )
             self._save_queue_state()
+            if notification_label:
+                affected_jobs = [job for job in self.jobs if job.id in set(ids)]
+                offline_count = sum(1 for job in affected_jobs if job.runtime.status == JobStatus.OFFLINE)
+                message = f"{notification_label}: {len(affected_jobs)} job(s) refreshed"
+                if offline_count:
+                    message += f", {offline_count} offline"
+                self._append_notification_message(message + ".", "warning" if offline_count else "info")
             refresh_needed = True
         finally:
             remaining_ids = [job_id for job_id in ids if job_id not in processed_ids]
@@ -969,6 +988,136 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             return 5
 
+    def _default_device_mode(self) -> DeviceOverrideMode:
+        return DeviceOverrideMode.coerce(self.config.get("default_device_mode", DeviceOverrideMode.DEFAULT.value))
+
+    def _default_device_selection(self) -> str:
+        return RenderJob.normalize_device_selection(self.config.get("default_device_selection", ""))
+
+    def _default_retain_built_usd(self) -> bool:
+        return bool(self.config.get("default_retain_built_usd", False))
+
+    def _default_usd_output_directory_mode(self) -> UsdOutputDirectoryMode:
+        return UsdOutputDirectoryMode.coerce(
+            self.config.get("default_usd_output_directory_mode", UsdOutputDirectoryMode.DEFAULT_TEMP.value)
+        )
+
+    def _default_usd_output_directory_custom_path(self) -> str:
+        return str(self.config.get("default_usd_output_directory_custom_path", "") or "").strip()
+
+    @staticmethod
+    def _is_virtual_or_integrated_gpu_name(name: str) -> bool:
+        txt = str(name or "").strip().lower()
+        if not txt:
+            return True
+        virtual_markers = (
+            "virtual",
+            "microsoft basic",
+            "hyper-v",
+            "vmware",
+            "citrix",
+            "remote",
+            "parsec",
+            "displaylink",
+            "mirage",
+            "swiftshader",
+            "llvmpipe",
+        )
+        if any(marker in txt for marker in virtual_markers):
+            return True
+        discrete_markers = (
+            "rtx",
+            "gtx",
+            "quadro",
+            "tesla",
+            "radeon rx",
+            "radeon pro",
+            "radeon vii",
+            "arc ",
+            "arc(tm)",
+        )
+        if any(marker in txt for marker in discrete_markers):
+            return False
+        integrated_patterns = (
+            r"\bintel\b",
+            r"\buhd\b",
+            r"\biris\b",
+            r"\bhd graphics\b",
+            r"\bradeon(?:\(tm\))?\s+graphics\b",
+            r"\bvega\s+graphics\b",
+        )
+        return any(re.search(pattern, txt) for pattern in integrated_patterns)
+
+    @staticmethod
+    def _device_brand_sort_key(name: str) -> tuple[int, str]:
+        txt = str(name or "").strip().lower()
+        if "nvidia" in txt or any(token in txt for token in ("rtx", "gtx", "quadro", "tesla")):
+            return (0, txt)
+        if "amd" in txt or "radeon" in txt:
+            return (1, txt)
+        if "intel" in txt or "arc" in txt:
+            return (2, txt)
+        return (3, txt)
+
+    def _available_render_devices(self) -> list[dict[str, str]]:
+        cached = getattr(self, "_render_device_infos", None)
+        if cached is not None:
+            return list(cached)
+        devices: list[dict[str, str]] = []
+        if os.name == "nt":
+            try:
+                cpu_name = ""
+                try:
+                    cpu_result = subprocess.run(
+                        [
+                            "powershell",
+                            "-NoProfile",
+                            "-Command",
+                            "$ErrorActionPreference='SilentlyContinue'; Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=4,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                    cpu_name = str(cpu_result.stdout or "").strip()
+                except Exception:
+                    cpu_name = ""
+                if cpu_name:
+                    devices.append({"id": "cpu", "name": cpu_name})
+                result = subprocess.run(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-Command",
+                        "$ErrorActionPreference='SilentlyContinue'; Get-CimInstance Win32_VideoController | Where-Object { $_.Name } | Select-Object -ExpandProperty Name",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=4,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                gpu_devices: list[dict[str, str]] = []
+                seen_counts: dict[str, int] = {}
+                gpu_index = 0
+                for raw_line in result.stdout.splitlines():
+                    name = str(raw_line or "").strip()
+                    if not name:
+                        continue
+                    if self._is_virtual_or_integrated_gpu_name(name):
+                        continue
+                    count = int(seen_counts.get(name, 0)) + 1
+                    seen_counts[name] = count
+                    label = name if count == 1 else f"{name} ({count})"
+                    gpu_devices.append({"id": str(gpu_index), "name": f"{label} ({gpu_index})"})
+                    gpu_index += 1
+                gpu_devices.sort(key=lambda item: self._device_brand_sort_key(str(item.get("name", ""))))
+                devices.extend(gpu_devices)
+            except Exception:
+                devices = []
+        self._render_device_infos = list(devices)
+        return list(devices)
+
     @staticmethod
     def _chunk_ranges_from_range(start: int, end: int, step: int, chunk_size: int) -> list[tuple[int, int, int]]:
         if step <= 0 or end < start:
@@ -1193,10 +1342,11 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.notifications_frame
 
     def _build_tree_view_panel(self) -> QtWidgets.QWidget:
-        panel, self.queue_tree, self.queue_tree_model = build_queue_tree_panel_model(
+        panel, self.queue_tree, self.queue_tree_model, self.btn_reload_all_tree = build_queue_tree_panel_model(
             self,
             item_changed_handler=self._on_queue_tree_item_changed,
         )
+        self.btn_reload_all_tree.clicked.connect(self._reload_all_jobs_from_files)
         self.tree_view_frame = panel
         return panel
 
@@ -1307,7 +1457,6 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_host_layout.setContentsMargins(8, 8, 8, 8)
         controls_host_layout.setSpacing(0)
         controls_host_layout.addLayout(controls_row)
-        layout.addWidget(controls_host)
 
         self.queue_table = QueueTableWidget()
         self.queue_table_model = QueueTableModel(
@@ -1400,13 +1549,78 @@ class MainWindow(QtWidgets.QMainWindow):
         self.queue_table.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
         self.queue_table.setLineWidth(0)
         self.queue_table.setMidLineWidth(0)
-        layout.addWidget(self.queue_table)
+
+        queue_table_host = QtWidgets.QWidget()
+        queue_table_layout = QtWidgets.QVBoxLayout(queue_table_host)
+        queue_table_layout.setContentsMargins(0, 0, 0, 0)
+        queue_table_layout.setSpacing(0)
+        queue_table_layout.addWidget(self.queue_table)
+
+        queue_left_host = QtWidgets.QWidget()
+        queue_left_layout = QtWidgets.QVBoxLayout(queue_left_host)
+        queue_left_layout.setContentsMargins(0, 0, 0, 0)
+        queue_left_layout.setSpacing(0)
+        queue_left_layout.addWidget(controls_host)
+        queue_left_layout.addWidget(queue_table_host, 1)
+
+        self.job_properties_panel = JobPropertiesPanel(self)
+        self.job_properties_panel.device_mode_changed.connect(self._on_job_properties_device_mode_changed)
+        self.job_properties_panel.device_selection_changed.connect(self._on_job_properties_device_selection_changed)
+        self.job_properties_panel.render_all_frames_single_process_changed.connect(self._on_job_properties_render_all_frames_single_process_changed)
+        self.job_properties_panel.retain_built_usd_changed.connect(self._on_job_properties_retain_built_usd_changed)
+        self.job_properties_panel.reuse_retained_usd_changed.connect(self._on_job_properties_reuse_retained_usd_changed)
+        self.job_properties_panel.usd_output_directory_mode_changed.connect(self._on_job_properties_usd_output_directory_mode_changed)
+        self.job_properties_panel.usd_output_directory_custom_path_changed.connect(self._on_job_properties_usd_output_directory_custom_path_changed)
+        self.job_properties_panel.reveal_retained_usd_requested.connect(self._reveal_selected_retained_usd)
+        self.job_properties_panel.delete_retained_usd_requested.connect(self._delete_selected_retained_usd)
+        self.job_properties_frame = PanelFrame("Job Properties", self.job_properties_panel)
+        self.job_properties_frame.setObjectName("jobPropertiesFrame")
+        self.job_properties_frame.set_body_margins(0, 0, 0, 0)
+
+        self.queue_properties_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.queue_properties_splitter.addWidget(queue_left_host)
+        self.queue_properties_splitter.addWidget(self.job_properties_frame)
+        self.queue_properties_splitter.setStretchFactor(0, 5)
+        self.queue_properties_splitter.setStretchFactor(1, 2)
+        self.queue_properties_splitter.setSizes([940, 320])
+        layout.addWidget(self.queue_properties_splitter, 1)
 
         box.setObjectName("panelEmbeddedGroup")
         box.setTitle("")
         panel = PanelFrame("Render Queue", box)
         panel.set_body_margins(0, 0, 0, 0)
         return panel
+
+    def _toggle_job_properties_panel(self) -> None:
+        focus_widget = QtWidgets.QApplication.focusWidget()
+        if isinstance(focus_widget, (QtWidgets.QLineEdit, QtWidgets.QPlainTextEdit, QtWidgets.QTextEdit, QtWidgets.QAbstractSpinBox)):
+            return
+        if isinstance(focus_widget, QtWidgets.QComboBox) and focus_widget.isEditable():
+            return
+        splitter = getattr(self, "queue_properties_splitter", None)
+        panel = getattr(self, "job_properties_panel", None)
+        if splitter is None or panel is None:
+            return
+        sizes = splitter.sizes()
+        if len(sizes) < 2:
+            return
+        total = max(sum(sizes), 1)
+        panel_has_focus = bool(focus_widget is not None and (focus_widget is panel or panel.isAncestorOf(focus_widget)))
+        if sizes[1] > 24 and panel_has_focus:
+            self._job_properties_last_width = max(int(sizes[1]), 280)
+            splitter.setSizes([total, 0])
+            if getattr(self, "queue_table", None) is not None:
+                self.queue_table.setFocus(QtCore.Qt.FocusReason.ShortcutFocusReason)
+            return
+        if sizes[1] <= 24:
+            right = max(int(getattr(self, "_job_properties_last_width", 320) or 320), 280)
+            right = min(right, max(280, total - 220))
+            left = max(1, total - right)
+            splitter.setSizes([left, right])
+        if getattr(panel, "device_mode_combo", None) is not None and panel.device_mode_combo.isEnabled():
+            panel.device_mode_combo.setFocus(QtCore.Qt.FocusReason.ShortcutFocusReason)
+        else:
+            panel.setFocus(QtCore.Qt.FocusReason.ShortcutFocusReason)
 
     def _build_right_panel(self) -> QtWidgets.QWidget:
         host = QtWidgets.QWidget()
@@ -1481,6 +1695,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 "retry_count": self._default_retry_count(),
                 "retry_delay": self._default_retry_delay(),
             },
+            {
+                "mode": self._default_device_mode().value,
+                "selection": self._default_device_selection(),
+                "retain_built_usd": self._default_retain_built_usd(),
+                "usd_output_directory_mode": self._default_usd_output_directory_mode().value,
+                "usd_output_directory_custom_path": self._default_usd_output_directory_custom_path(),
+            },
             str(self.config.logs_dir),
             discover_hbatch,
             safe_message,
@@ -1497,6 +1718,7 @@ class MainWindow(QtWidgets.QMainWindow):
         player_path = str(payload.get("player_path", "")).strip()
         theme = payload.get("theme", {})
         runtime_defaults = payload.get("runtime_defaults", {})
+        device_defaults = payload.get("device_defaults", {})
         self._hbatch_path = hbatch_path
         self._save_hbatch_path()
         self.config.set("player_path", player_path)
@@ -1528,6 +1750,18 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, "spin_retry_delay"):
                 self.spin_retry_delay.setValue(retry_delay)
             self._refresh_ui_state()
+        if isinstance(device_defaults, dict):
+            mode = DeviceOverrideMode.coerce(device_defaults.get("mode"))
+            selection = RenderJob.normalize_device_selection(device_defaults.get("selection", ""))
+            retain_built_usd = bool(device_defaults.get("retain_built_usd", False))
+            usd_output_directory_mode = UsdOutputDirectoryMode.coerce(device_defaults.get("usd_output_directory_mode"))
+            usd_output_directory_custom_path = str(device_defaults.get("usd_output_directory_custom_path", "") or "").strip()
+            self.config.set("default_device_mode", mode.value)
+            self.config.set("default_device_selection", selection)
+            self.config.set("default_retain_built_usd", retain_built_usd)
+            self.config.set("default_usd_output_directory_mode", usd_output_directory_mode.value)
+            self.config.set("default_usd_output_directory_custom_path", usd_output_directory_custom_path)
+            self._update_job_properties_panel()
 
     def _current_hbatch_path(self) -> str:
         return self._hbatch_path.strip()
@@ -1611,6 +1845,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.left_column_splitter.setHandleWidth(panel_gap)
         if hasattr(self, "right_vertical_splitter"):
             self.right_vertical_splitter.setHandleWidth(panel_gap)
+        if hasattr(self, "queue_properties_splitter"):
+            self.queue_properties_splitter.setHandleWidth(panel_gap)
         if hasattr(self, "queue_table"):
             self.queue_table.selection_line_color = QtGui.QColor(t["selection_line"])
             self.queue_table.selection_row_color = QtGui.QColor(t["selection_row"])
@@ -1660,6 +1896,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, "add_job_panel"):
                 strict_hint = self.add_job_panel.rop_strict_frame_range_for_path(job.spec.rop_path)
                 job.spec.strict_frame_range = bool(strict_hint)
+                allframes_hint = self.add_job_panel.rop_all_frames_single_process_for_path(job.spec.rop_path)
+                job.spec.render_all_frames_single_process = bool(allframes_hint)
                 output_hint = self.add_job_panel.rop_output_path_for_path(job.spec.rop_path)
                 if output_hint:
                     job.view.out_file_sample_path = output_hint
@@ -1673,7 +1911,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if job.spec.frame_range_mode == "use_rop":
                 if job.runtime.runtime_start_frame is None or job.runtime.runtime_end_frame is None:
                     try:
-                        probe_err = self._probe_and_apply_job_rop_metadata(job)
+                        probe_err = self._probe_and_apply_job_rop_metadata(job, apply_single_process_setting=True)
                     except Exception as exc:
                         probe_err = f"probe_failed: {exc}"
                     if probe_err == "node_not_found":
@@ -1684,10 +1922,25 @@ class MainWindow(QtWidgets.QMainWindow):
                             self._mark_job_offline(job, str(probe_err))
 
             if job.spec.frame_range_mode == "override":
-                strict_probe = self._probe_rop_strict_frame_range(job.spec.hip_path, job.spec.rop_path)
-                if strict_probe is not None and hasattr(self, "add_job_panel"):
-                    self.add_job_panel.set_rop_strict_frame_range_hint(job.spec.rop_path, strict_probe)
-                    job.spec.strict_frame_range = bool(strict_probe)
+                info = self._probe_rop_info(job.spec.hip_path, job.spec.rop_path)
+                if info is not None:
+                    apply_rop_info_to_job_model(
+                        job,
+                        info,
+                        self._normalize_output_display_path,
+                        apply_runtime_range=False,
+                        apply_single_process_setting=True,
+                    )
+                    if hasattr(self, "add_job_panel"):
+                        if info.strict_frame_range is not None:
+                            self.add_job_panel.set_rop_strict_frame_range_hint(job.spec.rop_path, bool(info.strict_frame_range))
+                        if info.all_frames_single_process is not None:
+                            self.add_job_panel.set_rop_all_frames_single_process_hint(job.spec.rop_path, bool(info.all_frames_single_process))
+                elif hasattr(self, "add_job_panel"):
+                    strict_probe = self._probe_rop_strict_frame_range(job.spec.hip_path, job.spec.rop_path)
+                    if strict_probe is not None:
+                        self.add_job_panel.set_rop_strict_frame_range_hint(job.spec.rop_path, strict_probe)
+                        job.spec.strict_frame_range = bool(strict_probe)
                 if job.spec.strict_frame_range:
                     return
 
@@ -1758,6 +2011,13 @@ class MainWindow(QtWidgets.QMainWindow):
             end_frame=end_frame,
             step=step,
             name=name,
+            device_override_mode=DeviceOverrideMode.DEFAULT,
+            device_selection="",
+            render_all_frames_single_process=False,
+            retain_built_usd=self._default_retain_built_usd(),
+            reuse_retained_usd=False,
+            usd_output_directory_mode=self._default_usd_output_directory_mode(),
+            usd_output_directory_custom_path=self._default_usd_output_directory_custom_path(),
         )
         job.runtime.log_file_path = str(self.config.new_job_log_path(job.display_name()))
         job.view.phase_text = ""
@@ -1768,8 +2028,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _probe_rop_info(self, hip_path: str, rop_path: str) -> RopInfo | None:
         return self.scan_coordinator.probe_rop_info(hip_path, rop_path)
 
-    def _probe_and_apply_job_rop_metadata(self, job: RenderJob) -> str | None:
-        return self.scan_coordinator.probe_and_apply_job_rop_metadata(job)
+    def _probe_and_apply_job_rop_metadata(self, job: RenderJob, *, apply_single_process_setting: bool = False) -> str | None:
+        return self.scan_coordinator.probe_and_apply_job_rop_metadata(
+            job,
+            apply_single_process_setting=apply_single_process_setting,
+        )
 
     def _probe_rop_strict_frame_range(self, hip_path: str, rop_path: str) -> bool | None:
         return self.scan_coordinator.probe_rop_strict_frame_range(hip_path, rop_path)
@@ -1808,6 +2071,81 @@ class MainWindow(QtWidgets.QMainWindow):
             disable_husk_mplay=disable_husk_mplay,
             hook_paths=hook_paths,
         )
+
+    def _build_render_environment(self, job: RenderJob) -> dict[str, str]:
+        mode = self._effective_device_mode_for_job(job)
+        selection = self._effective_device_selection_for_job(job)
+        self._sync_retained_usd_file_state(job)
+        selected_tokens = [part.strip().lower() for part in str(selection or "").split(",") if part.strip()]
+        cpu_selected = "cpu" in selected_tokens
+        selected_gpu_ids = [part for part in selected_tokens if part.isdigit()]
+        all_gpu_ids = [str(device.get("id", "") or "") for device in self._available_render_devices() if str(device.get("id", "") or "").isdigit()]
+        single_process_render = self._single_process_render_enabled_for_job(job)
+        retain_usd_enabled = bool(job.spec.retain_built_usd) and single_process_render
+        env: dict[str, str] = {
+            "HSRM_DEVICE_MODE": mode.value,
+            "HSRM_DEVICE_SELECTION": selection,
+            "HSRM_DEVICE_INCLUDE_CPU": "1" if cpu_selected else "0",
+            "HSRM_RENDER_ALL_FRAMES_SINGLE_PROCESS": "1" if single_process_render else "0",
+            "HSRM_RETAIN_USD_ENABLED": "1" if retain_usd_enabled else "0",
+            "HSRM_RETAIN_USD_HELPER_PATH": str(self.config.hook_script_path("hsrm_retained_usd_paths")),
+        }
+        if retain_usd_enabled:
+            planned_build_range = self._current_retained_usd_build_range(job)
+            output_path = str(job.runtime.retained_usd_path or "").strip()
+            configured_output_dir = self._configured_retained_usd_folder_preview(job)
+            invalid_reason = self._retained_usd_invalid_reason(job)
+            should_delete_existing = bool(
+                output_path
+                and (
+                    not bool(job.spec.reuse_retained_usd)
+                    or bool(invalid_reason)
+                )
+            )
+            if should_delete_existing:
+                self._delete_retained_usd_folder_for_job(job)
+                self._sync_retained_usd_file_state(job)
+                if planned_build_range is not None:
+                    job.runtime.retained_usd_build_start_frame = int(planned_build_range[0])
+                    job.runtime.retained_usd_build_end_frame = int(planned_build_range[1])
+                    job.runtime.retained_usd_build_step = int(planned_build_range[2])
+                output_path = str(job.runtime.retained_usd_path or "").strip()
+            reuse_existing = bool(
+                job.spec.reuse_retained_usd
+                and output_path
+                and job.runtime.retained_usd_reusable
+                and Path(output_path).exists()
+                and not invalid_reason
+            )
+            job.runtime.retained_usd_metadata_pending_write = bool(not reuse_existing)
+            if reuse_existing and output_path:
+                env["HSRM_RETAIN_USD_OUTPUT_PATH"] = output_path
+            elif configured_output_dir:
+                env["HSRM_RETAIN_USD_OUTPUT_DIR"] = configured_output_dir
+            env["HSRM_REUSE_EXISTING_USD"] = "1" if reuse_existing else "0"
+            if reuse_existing:
+                stale_reason = self._retained_usd_stale_reason(job)
+                if stale_reason:
+                    self._append_log("Stderr", f"[RetainUSD] {stale_reason}\n")
+                    self._append_notification_message(stale_reason, "warning")
+            elif invalid_reason:
+                self._append_log("Stderr", f"[RetainUSD] {invalid_reason}\n")
+                self._append_notification_message(invalid_reason, "warning")
+        if mode is DeviceOverrideMode.CPU:
+            env["HOUDINI_OCL_DEVICETYPE"] = "CPU"
+            env["CUDA_VISIBLE_DEVICES"] = "-1"
+        elif mode is DeviceOverrideMode.ALL_GPUS:
+            env["HOUDINI_OCL_DEVICETYPE"] = "GPU"
+            if all_gpu_ids:
+                env["CUDA_VISIBLE_DEVICES"] = ",".join(all_gpu_ids)
+        elif mode is DeviceOverrideMode.SPECIFIC_GPUS:
+            if selected_gpu_ids:
+                env["HOUDINI_OCL_DEVICETYPE"] = "GPU"
+                env["CUDA_VISIBLE_DEVICES"] = ",".join(selected_gpu_ids)
+            elif cpu_selected:
+                env["HOUDINI_OCL_DEVICETYPE"] = "CPU"
+                env["CUDA_VISIBLE_DEVICES"] = "-1"
+        return env
 
     def _queue_proxy_model(self) -> QueueFilterProxyModel | None:
         proxy = getattr(self, "queue_filter_proxy", None)
@@ -1850,6 +2188,685 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _selected_job_ids(self) -> list[str]:
         return [job.id for job in self._selected_jobs()]
+
+    @staticmethod
+    def _mixed_value(values: list[Any]) -> tuple[bool, Any]:
+        if not values:
+            return False, None
+        first = values[0]
+        return (any(value != first for value in values[1:]), first)
+
+    def _effective_device_mode_for_job(self, job: RenderJob) -> DeviceOverrideMode:
+        return job.effective_device_mode(self._default_device_mode())
+
+    def _effective_device_selection_for_job(self, job: RenderJob) -> str:
+        return job.effective_device_selection(self._default_device_selection())
+
+    def _effective_device_summary_for_job(self, job: RenderJob) -> str:
+        return job.device_summary(
+            self._default_device_mode(),
+            self._default_device_selection(),
+        )
+
+    @staticmethod
+    def _job_file_name(job: RenderJob) -> str:
+        path = str(job.spec.hip_path or "").strip()
+        if not path:
+            return "-"
+        return Path(path).name or path
+
+    @staticmethod
+    def _job_rop_name(job: RenderJob) -> str:
+        rop_path = str(job.spec.rop_path or "").strip().rstrip("/")
+        if not rop_path:
+            return "-"
+        return rop_path.split("/")[-1] or rop_path
+
+    @staticmethod
+    def _safe_usd_folder_name(name: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(name or "").strip()).strip("_")
+        return cleaned or "rop"
+
+    def _effective_usd_output_directory_mode_for_job(self, job: RenderJob) -> UsdOutputDirectoryMode:
+        return UsdOutputDirectoryMode.coerce(job.spec.usd_output_directory_mode)
+
+    def _effective_usd_output_directory_custom_path_for_job(self, job: RenderJob) -> str:
+        return str(job.spec.usd_output_directory_custom_path or "").strip()
+
+    @staticmethod
+    def _single_process_render_enabled_for_job(job: RenderJob) -> bool:
+        return bool(job.spec.render_all_frames_single_process)
+
+    def _configured_retained_usd_folder_preview(self, job: RenderJob) -> str:
+        mode = self._effective_usd_output_directory_mode_for_job(job)
+        if mode is UsdOutputDirectoryMode.DEFAULT_TEMP:
+            return ""
+        if mode is UsdOutputDirectoryMode.PROJECT_PATH:
+            hip_path = str(job.spec.hip_path or "").strip()
+            if not hip_path:
+                return ""
+            hip_name = Path(hip_path).stem or "hip"
+            base_dir = Path(hip_path).parent / "usd_renders" / self._safe_usd_folder_name(hip_name)
+        else:
+            custom_path = self._effective_usd_output_directory_custom_path_for_job(job)
+            if not custom_path:
+                return ""
+            base_dir = Path(custom_path)
+        rop_name = self._safe_usd_folder_name(self._job_rop_name(job))
+        return str(base_dir / f"{rop_name}_$RENDERID")
+
+    def _device_option_states_for_jobs(
+        self,
+        jobs: list[RenderJob],
+        *,
+        show_custom_devices: bool,
+        editable: bool,
+    ) -> list[dict[str, Any]]:
+        if not show_custom_devices:
+            return []
+        devices = self._available_render_devices()
+        if not devices:
+            return []
+        selected_sets = []
+        for job in jobs:
+            normalized = RenderJob.normalize_device_selection(job.spec.device_selection)
+            selected_sets.append(set(part for part in normalized.split(",") if part))
+        option_states: list[dict[str, Any]] = []
+        for device in devices:
+            device_id = str(device.get("id", "") or "")
+            selected_count = sum(1 for selected in selected_sets if device_id in selected)
+            if selected_count <= 0:
+                check_state = QtCore.Qt.CheckState.Unchecked
+            elif selected_count >= len(selected_sets):
+                check_state = QtCore.Qt.CheckState.Checked
+            else:
+                check_state = QtCore.Qt.CheckState.PartiallyChecked
+            option_states.append(
+                {
+                    "id": device_id,
+                    "name": str(device.get("name", "") or device_id),
+                    "check_state": int(getattr(check_state, "value", check_state)),
+                    "enabled": editable,
+                }
+            )
+        return option_states
+
+    def _selected_retained_usd_paths(self) -> list[Path]:
+        paths: list[Path] = []
+        for job in self._selected_jobs():
+            retained_path = str(job.runtime.retained_usd_path or "").strip()
+            if not self._is_absolute_retained_usd_path(retained_path):
+                continue
+            path = Path(retained_path)
+            if path.exists():
+                paths.append(path)
+        return paths
+
+    @staticmethod
+    def _is_absolute_retained_usd_path(path_text: str) -> bool:
+        try:
+            return bool(path_text) and Path(path_text).is_absolute()
+        except Exception:
+            return False
+
+    @staticmethod
+    def _clear_retained_usd_runtime(job: RenderJob) -> None:
+        job.runtime.retained_usd_path = ""
+        job.runtime.retained_usd_exists = False
+        job.runtime.retained_usd_reusable = False
+        job.runtime.retained_usd_verified = False
+        job.runtime.retained_usd_build_start_frame = None
+        job.runtime.retained_usd_build_end_frame = None
+        job.runtime.retained_usd_build_step = None
+        job.runtime.retained_usd_metadata_pending_write = False
+
+    def _job_properties_panel_default_state(self) -> dict[str, Any]:
+        check_state_value = lambda state: int(getattr(state, "value", state))
+        default_usd_output_mode = self._default_usd_output_directory_mode()
+        return {
+            "name_text": "-",
+            "file_text": "-",
+            "rop_text": "-",
+            "editable": False,
+            "device_mode": DeviceOverrideMode.DEFAULT.value,
+            "show_custom_devices": False,
+            "device_options": [],
+            "device_selection_enabled": False,
+            "single_process_render_check_state": check_state_value(QtCore.Qt.CheckState.Unchecked),
+            "retain_check_state": check_state_value(QtCore.Qt.CheckState.Unchecked),
+            "reuse_check_state": check_state_value(QtCore.Qt.CheckState.Unchecked),
+            "reuse_enabled": False,
+            "mixed_usd_output_mode": False,
+            "usd_output_directory_mode": default_usd_output_mode.value,
+            "usd_output_directory_custom_path": self._default_usd_output_directory_custom_path(),
+            "retained_usd_path": "",
+            "retained_usd_built_range": "-",
+            "retained_usd_built_step": "-",
+            "retained_usd_built_at": "-",
+            "retained_usd_status": "-",
+            "retained_usd_warning": "",
+            "can_open": False,
+            "can_delete": False,
+        }
+
+    def _single_job_retained_usd_panel_state(self, job: RenderJob) -> dict[str, Any]:
+        self._sync_retained_usd_file_state(job)
+        retained_file_path = str(job.runtime.retained_usd_path or "").strip()
+        metadata = None
+        retained_path_text = ""
+        retained_built_range_text = "-"
+        retained_built_step_text = "-"
+        retained_built_at_text = "-"
+        can_open = False
+
+        if retained_file_path:
+            retained_path = Path(retained_file_path)
+            retained_path_text = str(retained_path.parent)
+            metadata = self._load_retained_usd_metadata(retained_path)
+            retained_built_range_text, retained_built_step_text = self._retained_usd_build_info(metadata)
+            retained_built_at_text = self._retained_usd_built_at_text(metadata)
+            can_open = bool(job.runtime.retained_usd_exists and self._is_absolute_retained_usd_path(retained_file_path))
+        elif bool(job.spec.retain_built_usd):
+            retained_path_text = self._configured_retained_usd_folder_preview(job)
+
+        retained_warning = self._retained_usd_hip_stale_reason(job, metadata) if metadata else self._retained_usd_stale_reason(job)
+        if not retained_warning:
+            retained_warning = self._retained_usd_invalid_reason(job)
+
+        return {
+            "retained_usd_path": retained_path_text,
+            "retained_usd_built_range": retained_built_range_text,
+            "retained_usd_built_step": retained_built_step_text,
+            "retained_usd_built_at": retained_built_at_text,
+            "retained_usd_status": self._retained_usd_status_text(job, metadata),
+            "retained_usd_warning": retained_warning,
+            "can_open": can_open,
+        }
+
+    def _sync_retained_usd_file_state(self, job: RenderJob) -> None:
+        if not bool(job.runtime.retained_usd_verified):
+            job.runtime.retained_usd_path = ""
+            job.runtime.retained_usd_exists = False
+            job.runtime.retained_usd_reusable = False
+            return
+        retained_path = str(job.runtime.retained_usd_path or "").strip()
+        if not retained_path:
+            job.runtime.retained_usd_exists = False
+            job.runtime.retained_usd_reusable = False
+            return
+        path = Path(retained_path)
+        exists = path.exists()
+        job.runtime.retained_usd_exists = exists
+        if (
+            exists
+            and bool(job.runtime.retained_usd_metadata_pending_write)
+            and self._should_write_retained_usd_metadata_now(job)
+        ):
+            self._write_retained_usd_metadata(job, path)
+            job.runtime.retained_usd_metadata_pending_write = False
+        job.runtime.retained_usd_reusable = bool(exists and not self._retained_usd_invalid_reason(job))
+
+    @staticmethod
+    def _should_write_retained_usd_metadata_now(job: RenderJob) -> bool:
+        if job.runtime.status == JobStatus.DONE:
+            return True
+        return bool(
+            job.runtime.status == JobStatus.RUNNING
+            and job.view.build_pass_completed
+            and job.view.phase_text == "Render"
+        )
+
+    def _retained_usd_metadata_path(self, retained_usd_path: Path) -> Path:
+        return retained_usd_path.with_name(f"{retained_usd_path.name}.hsrm.json")
+
+    def _current_retained_usd_build_range(self, job: RenderJob) -> tuple[int, int, int] | None:
+        resolved = self._resolve_job_range_for_execution(job, mutate_job=False)
+        if resolved is None:
+            return None
+        start, end, step = resolved
+        return int(start), int(end), int(step)
+
+    def _current_retained_usd_reuse_range(self, job: RenderJob) -> tuple[int, int, int] | None:
+        if (
+            job.runtime.status == JobStatus.RUNNING
+            and job.runtime.chunk_total_runtime > 0
+            and
+            job.runtime.chunk_start_frame_runtime is not None
+            and job.runtime.chunk_end_frame_runtime is not None
+            and (job.runtime.chunk_step_runtime or 0) > 0
+        ):
+            return (
+                int(job.runtime.chunk_start_frame_runtime),
+                int(job.runtime.chunk_end_frame_runtime),
+                int(job.runtime.chunk_step_runtime),
+            )
+        resolved = self._resolve_job_range_for_execution(job, mutate_job=False)
+        if resolved is None:
+            return None
+        start, end, step = resolved
+        return int(start), int(end), int(step)
+
+    def _load_retained_usd_metadata(self, retained_usd_path: Path) -> dict[str, Any] | None:
+        metadata_path = self._retained_usd_metadata_path(retained_usd_path)
+        if not metadata_path.exists():
+            return None
+        data = read_json_file(metadata_path)
+        if not isinstance(data, dict):
+            return None
+        return data
+
+    def _write_retained_usd_metadata(self, job: RenderJob, retained_usd_path: Path) -> None:
+        if (
+            job.runtime.retained_usd_build_start_frame is None
+            or job.runtime.retained_usd_build_end_frame is None
+            or (job.runtime.retained_usd_build_step or 0) <= 0
+        ):
+            return
+        start = int(job.runtime.retained_usd_build_start_frame)
+        end = int(job.runtime.retained_usd_build_end_frame)
+        step = int(job.runtime.retained_usd_build_step)
+        try:
+            hip_mtime = Path(job.spec.hip_path).stat().st_mtime if str(job.spec.hip_path or "").strip() else None
+        except Exception:
+            hip_mtime = None
+        payload = {
+            "version": 1,
+            "hip_path": str(job.spec.hip_path or ""),
+            "hip_mtime": hip_mtime,
+            "rop_path": str(job.spec.rop_path or ""),
+            "start_frame": int(start),
+            "end_frame": int(end),
+            "step": int(step),
+            "built_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        try:
+            write_json_atomic(self._retained_usd_metadata_path(retained_usd_path), payload)
+        except Exception as exc:
+            self._append_log("Stderr", f"[RetainUSD] Failed to write metadata sidecar: {exc}\n")
+
+    @staticmethod
+    def _retained_usd_build_info(metadata: dict[str, Any] | None) -> tuple[str, str]:
+        if not isinstance(metadata, dict):
+            return "-", "-"
+        start = metadata.get("start_frame")
+        end = metadata.get("end_frame")
+        step = metadata.get("step")
+        if start is None or end is None:
+            range_text = "-"
+        else:
+            range_text = f"{int(start)}-{int(end)}"
+        if step is None:
+            step_text = "-"
+        else:
+            step_text = str(int(step))
+        return range_text, step_text
+
+    @staticmethod
+    def _retained_usd_built_at_text(metadata: dict[str, Any] | None) -> str:
+        if not isinstance(metadata, dict):
+            return "-"
+        raw = str(metadata.get("built_at", "") or "").strip()
+        if not raw:
+            return "-"
+        try:
+            return datetime.fromisoformat(raw).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return raw
+
+    def _retained_usd_hip_stale_reason(self, job: RenderJob, metadata: dict[str, Any] | None) -> str:
+        if not isinstance(metadata, dict):
+            return ""
+        hip_path = str(job.spec.hip_path or "").strip()
+        if not hip_path:
+            return ""
+        built_hip_mtime = metadata.get("hip_mtime")
+        if built_hip_mtime is None:
+            return ""
+        try:
+            current_hip_mtime = Path(hip_path).stat().st_mtime
+        except Exception:
+            return ""
+        try:
+            built_hip_mtime_value = float(built_hip_mtime)
+        except (TypeError, ValueError):
+            return ""
+        if current_hip_mtime > built_hip_mtime_value:
+            return "Potentially stale: HIP was saved after this USD was built."
+        return ""
+
+    def _retained_usd_status_text(self, job: RenderJob, metadata: dict[str, Any] | None) -> str:
+        if not self._single_process_render_enabled_for_job(job) and (bool(job.spec.retain_built_usd) or bool(job.spec.reuse_retained_usd)):
+            return "Requires single-process render"
+        if not bool(job.spec.retain_built_usd):
+            return "Build on next render"
+        retained_path = str(job.runtime.retained_usd_path or "").strip()
+        if not retained_path or not bool(job.runtime.retained_usd_exists):
+            return "Build on next render"
+        if not bool(job.spec.reuse_retained_usd):
+            return "Build on next render"
+        if not isinstance(metadata, dict):
+            return "Build on next render"
+        if self._retained_usd_invalid_reason(job):
+            return "Build on next render"
+        return "Reuse on next render"
+
+    def _retained_usd_invalid_reason(self, job: RenderJob) -> str:
+        if not self._single_process_render_enabled_for_job(job):
+            if bool(job.spec.retain_built_usd) or bool(job.spec.reuse_retained_usd):
+                return "Cannot retain or reuse USD: enable Render All Frames with a Single Process."
+            return ""
+        retained_path = str(job.runtime.retained_usd_path or "").strip()
+        if not retained_path:
+            return ""
+        metadata = self._load_retained_usd_metadata(Path(retained_path))
+        if not metadata:
+            return "Cannot reuse USD: build metadata is unavailable."
+        current_range = self._current_retained_usd_reuse_range(job)
+        if current_range is None:
+            return ""
+        current_start, current_end, current_step = current_range
+        built_start = int(metadata.get("start_frame", current_start))
+        built_end = int(metadata.get("end_frame", current_end))
+        built_step = int(metadata.get("step", current_step))
+        if current_start < built_start or current_end > built_end:
+            return "Cannot reuse USD: current frame range exceeds the built USD range."
+        if built_step != 1:
+            if current_step == built_step:
+                if ((current_start - built_start) % built_step) == 0:
+                    return ""
+                return "Cannot reuse USD: current frame range is not aligned with the built USD step."
+            return "Cannot reuse USD: retained USD must be built with step 1 to reuse with a different step."
+        return ""
+
+    def _delete_retained_usd_folder_for_job(self, job: RenderJob) -> bool:
+        retained_path = str(job.runtime.retained_usd_path or "").strip()
+        if not retained_path:
+            return False
+        if not self._is_absolute_retained_usd_path(retained_path):
+            self._append_log("Stderr", f"[RetainUSD] Ignoring non-absolute retained USD path: {retained_path}\n")
+            self._clear_retained_usd_runtime(job)
+            return False
+        try:
+            folder = Path(retained_path).resolve().parent
+        except Exception:
+            folder = Path(retained_path).parent
+        if not folder.exists():
+            self._clear_retained_usd_runtime(job)
+            return False
+        try:
+            import shutil
+            shutil.rmtree(folder, ignore_errors=False)
+        except Exception as exc:
+            self._append_log("Stderr", f"[RetainUSD] Failed to delete previous USD folder before rebuild: {folder} ({exc})\n")
+            return False
+        self._clear_retained_usd_runtime(job)
+        self._append_log("Stdout", f"[RetainUSD] Deleted previous USD folder before rebuild: {folder}\n")
+        return True
+
+    def _retained_usd_stale_reason(self, job: RenderJob) -> str:
+        self._sync_retained_usd_file_state(job)
+        retained_path = str(job.runtime.retained_usd_path or "").strip()
+        if not retained_path:
+            return ""
+        metadata = self._load_retained_usd_metadata(Path(retained_path))
+        stale_reason = self._retained_usd_hip_stale_reason(job, metadata)
+        if stale_reason:
+            return stale_reason
+        invalid_reason = self._retained_usd_invalid_reason(job)
+        if invalid_reason:
+            return invalid_reason
+        return ""
+
+    def _apply_job_property_edit(
+        self,
+        *,
+        property_name: str,
+        apply_fn,
+        target_jobs: list[RenderJob],
+    ) -> None:
+        if not target_jobs:
+            return
+        editable = [job for job in target_jobs if can_edit_job(job, is_active_job=self._is_active_job(job), is_locked=self._is_job_path_sync_locked(job)).allowed]
+        if not editable:
+            return
+        target_ids = [job.id for job in editable]
+        before_states = self._job_states_for_ids(target_ids)
+        changed = False
+        for job in editable:
+            changed = bool(apply_fn(job) or changed)
+        if not changed:
+            self._update_job_properties_panel()
+            return
+        after_states = self._job_states_for_ids(target_ids)
+        self._push_history_command(
+            {
+                "kind": "update_jobs",
+                "before": before_states,
+                "after": after_states,
+                "undo_select_job_ids": self._selected_job_ids(),
+                "redo_select_job_ids": self._selected_job_ids(),
+            }
+        )
+        self._save_and_refresh_queue(select_job_ids=self._selected_job_ids())
+
+    def _update_job_properties_panel(self) -> None:
+        panel = getattr(self, "job_properties_panel", None)
+        if panel is None:
+            return
+        check_state_value = lambda state: int(getattr(state, "value", state))
+        selected_jobs = self._selected_jobs()
+        if not selected_jobs:
+            panel.set_state(self._job_properties_panel_default_state())
+            return
+
+        selected_count = len(selected_jobs)
+        mixed_name, first_name = self._mixed_value([job.display_name() for job in selected_jobs])
+        mixed_file, first_file = self._mixed_value([self._job_file_name(job) for job in selected_jobs])
+        mixed_rop, first_rop = self._mixed_value([self._job_rop_name(job) for job in selected_jobs])
+        mixed_device_mode, first_device_mode = self._mixed_value([job.spec.device_override_mode.value for job in selected_jobs])
+        mixed_single_process, first_single_process = self._mixed_value([bool(job.spec.render_all_frames_single_process) for job in selected_jobs])
+        mixed_retain, first_retain = self._mixed_value([bool(job.spec.retain_built_usd) for job in selected_jobs])
+        mixed_reuse, first_reuse = self._mixed_value([bool(job.spec.reuse_retained_usd) for job in selected_jobs])
+        mixed_usd_output_mode, first_usd_output_mode = self._mixed_value([job.spec.usd_output_directory_mode.value for job in selected_jobs])
+        mixed_usd_output_custom_path, first_usd_output_custom_path = self._mixed_value([str(job.spec.usd_output_directory_custom_path or "") for job in selected_jobs])
+        retained_usd_state: dict[str, Any]
+        retained_paths: list[Path] = []
+        if selected_count == 1:
+            retained_usd_state = self._single_job_retained_usd_panel_state(selected_jobs[0])
+        else:
+            retained_paths = self._selected_retained_usd_paths()
+            retained_usd_state = {
+                "retained_usd_path": f"{len({str(path.parent) for path in retained_paths})} USD folder(s)" if retained_paths else "",
+                "retained_usd_built_range": "-",
+                "retained_usd_built_step": "-",
+                "retained_usd_built_at": "-",
+                "retained_usd_status": f"{len(retained_paths)} file(s) available" if retained_paths else "No retained USD files",
+                "retained_usd_warning": "",
+                "can_open": False,
+            }
+
+        editable = all(
+            can_edit_job(job, is_active_job=self._is_active_job(job), is_locked=self._is_job_path_sync_locked(job)).allowed
+            for job in selected_jobs
+        )
+        current_device_mode = DeviceOverrideMode.coerce(first_device_mode)
+        show_custom_devices = current_device_mode is DeviceOverrideMode.SPECIFIC_GPUS and not mixed_device_mode
+        can_delete = bool(retained_usd_state["can_open"]) if selected_count == 1 else bool(retained_paths)
+        if can_delete:
+            can_delete = not any(self._is_active_job(job) or self._is_job_path_sync_locked(job) for job in selected_jobs)
+
+        panel.set_state(
+            {
+                "name_text": "Mixed" if mixed_name else str(first_name or "-"),
+                "file_text": "Mixed" if mixed_file else str(first_file or "-"),
+                "rop_text": "Mixed" if mixed_rop else str(first_rop or "-"),
+                "editable": editable,
+                "mixed_device_mode": mixed_device_mode,
+                "device_mode": first_device_mode or DeviceOverrideMode.DEFAULT.value,
+                "show_custom_devices": show_custom_devices,
+                "device_options": self._device_option_states_for_jobs(
+                    selected_jobs,
+                    show_custom_devices=show_custom_devices,
+                    editable=editable,
+                ),
+                "device_selection_enabled": show_custom_devices,
+                "single_process_render_check_state": check_state_value(
+                    QtCore.Qt.CheckState.PartiallyChecked if mixed_single_process
+                    else (QtCore.Qt.CheckState.Checked if first_single_process else QtCore.Qt.CheckState.Unchecked)
+                ),
+                "retain_check_state": check_state_value(
+                    QtCore.Qt.CheckState.PartiallyChecked if mixed_retain
+                    else (QtCore.Qt.CheckState.Checked if first_retain else QtCore.Qt.CheckState.Unchecked)
+                ),
+                "reuse_check_state": check_state_value(
+                    QtCore.Qt.CheckState.PartiallyChecked if mixed_reuse
+                    else (QtCore.Qt.CheckState.Checked if first_reuse else QtCore.Qt.CheckState.Unchecked)
+                ),
+                "reuse_enabled": editable and bool(first_retain or mixed_retain),
+                "mixed_usd_output_mode": mixed_usd_output_mode,
+                "usd_output_directory_mode": first_usd_output_mode or UsdOutputDirectoryMode.DEFAULT_TEMP.value,
+                "mixed_usd_output_custom_path": mixed_usd_output_custom_path,
+                "usd_output_directory_custom_path": "" if mixed_usd_output_custom_path else str(first_usd_output_custom_path or ""),
+                "retained_usd_path": retained_usd_state["retained_usd_path"],
+                "retained_usd_built_range": retained_usd_state["retained_usd_built_range"],
+                "retained_usd_built_step": retained_usd_state["retained_usd_built_step"],
+                "retained_usd_built_at": retained_usd_state["retained_usd_built_at"],
+                "retained_usd_status": retained_usd_state["retained_usd_status"],
+                "retained_usd_warning": retained_usd_state["retained_usd_warning"],
+                "can_open": bool(retained_usd_state["can_open"]),
+                "can_delete": can_delete,
+            }
+        )
+
+    def _on_job_properties_device_mode_changed(self, value: str) -> None:
+        mode = DeviceOverrideMode.coerce(value)
+        self._apply_job_property_edit(
+            property_name="device_override_mode",
+            apply_fn=lambda job: (False if job.spec.device_override_mode is mode else setattr(job.spec, "device_override_mode", mode) or True),
+            target_jobs=self._selected_jobs(),
+        )
+
+    def _on_job_properties_device_selection_changed(self, value: str) -> None:
+        normalized = RenderJob.normalize_device_selection(value)
+        self._apply_job_property_edit(
+            property_name="device_selection",
+            apply_fn=lambda job: (False if job.spec.device_selection == normalized else setattr(job.spec, "device_selection", normalized) or True),
+            target_jobs=self._selected_jobs(),
+        )
+
+    def _on_job_properties_retain_built_usd_changed(self, checked: bool) -> None:
+        self._apply_job_property_edit(
+            property_name="retain_built_usd",
+            apply_fn=lambda job: (
+                False
+                if bool(job.spec.retain_built_usd) == bool(checked) and (bool(checked) or not bool(job.spec.reuse_retained_usd))
+                else (
+                    setattr(job.spec, "retain_built_usd", bool(checked))
+                    or (setattr(job.spec, "reuse_retained_usd", False) if not bool(checked) else False)
+                    or True
+                )
+            ),
+            target_jobs=self._selected_jobs(),
+        )
+
+    def _on_job_properties_render_all_frames_single_process_changed(self, checked: bool) -> None:
+        self._apply_job_property_edit(
+            property_name="render_all_frames_single_process",
+            apply_fn=lambda job: (
+                False
+                if bool(job.spec.render_all_frames_single_process) == bool(checked)
+                else setattr(job.spec, "render_all_frames_single_process", bool(checked)) or True
+            ),
+            target_jobs=self._selected_jobs(),
+        )
+
+    def _on_job_properties_reuse_retained_usd_changed(self, checked: bool) -> None:
+        self._apply_job_property_edit(
+            property_name="reuse_retained_usd",
+            apply_fn=lambda job: (
+                False
+                if bool(job.spec.reuse_retained_usd) == bool(checked)
+                else setattr(job.spec, "reuse_retained_usd", bool(checked)) or True
+            ),
+            target_jobs=self._selected_jobs(),
+        )
+
+    def _on_job_properties_usd_output_directory_mode_changed(self, value: str) -> None:
+        mode = UsdOutputDirectoryMode.coerce(value)
+        self._apply_job_property_edit(
+            property_name="usd_output_directory_mode",
+            apply_fn=lambda job: (
+                False
+                if job.spec.usd_output_directory_mode is mode
+                else setattr(job.spec, "usd_output_directory_mode", mode) or True
+            ),
+            target_jobs=self._selected_jobs(),
+        )
+
+    def _on_job_properties_usd_output_directory_custom_path_changed(self, value: str) -> None:
+        normalized = str(value or "").strip()
+        self._apply_job_property_edit(
+            property_name="usd_output_directory_custom_path",
+            apply_fn=lambda job: (
+                False
+                if str(job.spec.usd_output_directory_custom_path or "") == normalized
+                else setattr(job.spec, "usd_output_directory_custom_path", normalized) or True
+            ),
+            target_jobs=self._selected_jobs(),
+        )
+
+    def _reveal_selected_retained_usd(self) -> None:
+        paths = self._selected_retained_usd_paths()
+        if not paths:
+            safe_message(self, "Retained USD", "No retained USD file is available for the current selection.")
+            return
+        target = paths[0]
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(target.parent)))
+
+    def _delete_selected_retained_usd(self) -> None:
+        selected_jobs = self._selected_jobs()
+        paths = self._selected_retained_usd_paths()
+        if not selected_jobs or not paths:
+            safe_message(self, "Retained USD", "No retained USD file is available for the current selection.")
+            return
+        if any(self._is_active_job(job) or self._is_job_path_sync_locked(job) for job in selected_jobs):
+            safe_message(self, "Retained USD", "Wait for the current job or path update to finish.")
+            return
+        deleted_any = False
+        target_dirs = {path.resolve().parent for path in paths}
+        for folder in target_dirs:
+            try:
+                import shutil
+                shutil.rmtree(folder, ignore_errors=False)
+                deleted_any = True
+            except Exception as exc:
+                safe_message(self, "Retained USD", f"Failed to delete retained USD folder:\n{folder}", str(exc))
+                return
+        if not deleted_any:
+            return
+        target_ids = [job.id for job in selected_jobs]
+        before_states = self._job_states_for_ids(target_ids)
+        for job in selected_jobs:
+            retained_path = str(job.runtime.retained_usd_path or "").strip()
+            if not retained_path:
+                continue
+            try:
+                resolved_dir = Path(retained_path).resolve().parent
+            except Exception:
+                resolved_dir = Path(retained_path).parent
+            if resolved_dir in target_dirs:
+                self._clear_retained_usd_runtime(job)
+        after_states = self._job_states_for_ids(target_ids)
+        self._push_history_command(
+            {
+                "kind": "update_jobs",
+                "before": before_states,
+                "after": after_states,
+                "undo_select_job_ids": target_ids,
+                "redo_select_job_ids": target_ids,
+            }
+        )
+        self._save_and_refresh_queue(select_job_ids=target_ids)
 
     def _refresh_queue_preserve_selection(self) -> None:
         selected_ids = self._selected_job_ids()
@@ -1931,6 +2948,7 @@ class MainWindow(QtWidgets.QMainWindow):
         clone.runtime.exit_code = None
         clone.runtime.error_summary = ""
         clone.runtime.offline_detected_reason = ""
+        self._clear_retained_usd_runtime(clone)
         clone.view.progress_text = "-"
         clone.view.percent_text = "-"
         clone.view.usd_build_percent = None
@@ -2217,6 +3235,31 @@ class MainWindow(QtWidgets.QMainWindow):
             }
         )
 
+    def _defer_reload_jobs_from_file(
+        self,
+        target_jobs: list[RenderJob],
+        *,
+        reset_override_to_rop: bool,
+        status_text: str,
+        notification_label: str,
+    ) -> None:
+        ids = [job.id for job in target_jobs if job is not None and str(job.id or "").strip()]
+        if not ids:
+            return
+        before_states = self._job_states_for_ids(ids)
+        self._begin_path_sync_lock(ids)
+        self._enqueue_path_sync_task(
+            {
+                "ids": ids,
+                "before_states": before_states,
+                "undo_select_job_ids": ids,
+                "redo_select_job_ids": ids,
+                "status_text": status_text,
+                "reset_override_to_rop": reset_override_to_rop,
+                "notification_label": notification_label,
+            }
+        )
+
     def _on_queue_tree_item_changed(self, item: QtGui.QStandardItem) -> None:
         if getattr(self, "_suppress_tree_item_changed", False):
             return
@@ -2394,7 +3437,7 @@ class MainWindow(QtWidgets.QMainWindow):
             menu.addSeparator()
             act_reset_cell_cached = menu.addAction("Reset Value")
             act_reset_cell_cached.setEnabled((not any_locked) and any(self._job_can_reset_cached_cell(t, idx.column()) for t in target_jobs))
-        act_reload_from_rop = menu.addAction("Reload from File")
+        act_reload_from_rop = menu.addAction("Reload Values from File")
         reload_decision = can_reload_jobs_from_file(
             target_jobs=target_jobs,
             is_active_job_fn=self._is_active_job,
@@ -2487,29 +3530,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 self._save_and_refresh_queue(select_job_ids=[j.id for j in target_jobs])
         elif chosen == act_reload_from_rop:
-            target_ids = [j.id for j in target_jobs]
-            before_states = self._job_states_for_ids(target_ids)
             if not reload_decision.allowed:
                 safe_message(self, "Reload From File", reload_decision.reason)
                 return
-            try:
-                changed_ids = self._refresh_jobs_from_rop_metadata(target_jobs, reset_override_to_rop=True)
-            except Exception as exc:
-                safe_message(self, "Reload Failed", f"Failed to reload job metadata: {exc}", traceback.format_exc())
-                self._refresh_queue_preserve_selection()
-                return
-            if changed_ids:
-                after_states = self._job_states_for_ids(changed_ids)
-                self._push_history_command(
-                    {
-                        "kind": "update_jobs",
-                        "before": before_states,
-                        "after": after_states,
-                        "undo_select_job_ids": target_ids,
-                        "redo_select_job_ids": [j.id for j in target_jobs],
-                    }
-                )
-                self._save_and_refresh_queue(select_job_ids=[j.id for j in target_jobs])
+            self._defer_reload_jobs_from_file(
+                target_jobs,
+                reset_override_to_rop=True,
+                status_text="Reloading values from file...",
+                notification_label="Reload Values from File",
+            )
         elif chosen == act_duplicate:
             self._duplicate_selected_jobs()
         elif chosen == act_remove:
@@ -3317,6 +4346,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.queue_table.viewport().update()
         self._refresh_queue_tree_view()
+        self._update_job_properties_panel()
         self._refresh_ui_state()
 
     def _refresh_job_row(self, job_id: str) -> None:
@@ -3336,6 +4366,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.queue_table_model.refresh_job_by_id(target_id)
         self.queue_table.viewport().update()
+        selected_ids = set(self._selected_job_ids())
+        if target_id in selected_ids:
+            self._update_job_properties_panel()
         self._refresh_ui_state()
 
     def _refresh_queue_tree_view(self) -> None:
@@ -3570,6 +4603,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_queue_selection_changed(self) -> None:
         self.queue_table.viewport().update()
+        self._update_job_properties_panel()
         self._refresh_ui_state()
 
     @staticmethod
@@ -3936,8 +4970,6 @@ class MainWindow(QtWidgets.QMainWindow):
             records = list(payload.get("records", []) or [])
             renderable_records = [r for r in records if self._is_likely_renderable_scan_node(r)]
             selected_records = renderable_records or records
-            hip_path = str(payload.get("hip_path", "") or getattr(self, "_scan_hip_path_requested", "") or "")
-            self._apply_scan_metadata_to_existing_jobs(hip_path, records)
             if selected_records:
                 self.add_job_panel.set_scanned_rops(selected_records)
                 if renderable_records:
@@ -3961,37 +4993,6 @@ class MainWindow(QtWidgets.QMainWindow):
             safe_message(self, "Scan", message_text, details or None)
             self._set_status_message(message_text, 5000)
             self._refresh_ui_state()
-
-    def _apply_scan_metadata_to_existing_jobs(self, hip_path: str, records: list[dict[str, Any]]) -> None:
-        hip_path_norm = os.path.normcase(str(hip_path or "").strip())
-        if not hip_path_norm:
-            return
-        rec_map = {
-            str(r.get("path", "")).strip(): r
-            for r in records
-            if str(r.get("path", "")).strip()
-        }
-        changed = False
-        for job in self.jobs:
-            if os.path.normcase(job.spec.hip_path) != hip_path_norm:
-                continue
-            rec = rec_map.get(job.spec.rop_path)
-            if rec is None:
-                continue
-            before = (job.spec.strict_frame_range, job.view.out_path, job.view.out_file_sample_path)
-            info = rop_info_from_scan_record_model(rec)
-            apply_rop_info_to_job_model(
-                job,
-                info,
-                self._normalize_output_display_path,
-                apply_runtime_range=True,
-            )
-            after = (job.spec.strict_frame_range, job.view.out_path, job.view.out_file_sample_path)
-            if before != after:
-                changed = True
-        if changed:
-            self._save_queue_state()
-            self._refresh_queue_table()
 
     @staticmethod
     def _is_likely_renderable_scan_node(record: dict[str, str]) -> bool:
@@ -4142,6 +5143,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if not job.runtime.chunk_ranges_runtime and self._chunking_enabled():
             # Fall back to non-chunked execution if range resolution failed.
             job.runtime.chunk_retry_count_runtime = self._retry_count_value()
+        build_range = self._current_retained_usd_build_range(job)
+        if build_range is not None:
+            job.runtime.retained_usd_build_start_frame = int(build_range[0])
+            job.runtime.retained_usd_build_end_frame = int(build_range[1])
+            job.runtime.retained_usd_build_step = int(build_range[2])
+        else:
+            job.runtime.retained_usd_build_start_frame = None
+            job.runtime.retained_usd_build_end_frame = None
+            job.runtime.retained_usd_build_step = None
 
         resume_baseline = int(max(0, baseline_done))
 
@@ -4317,7 +5327,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _update_job_render_timing_stats(job: RenderJob) -> None:
-        update_job_render_timing_stats_model(job, format_duration_short_fn=format_duration_short)
+        update_job_render_timing_stats_model(job, format_duration_short_fn=format_duration_short_model)
 
     def _update_phase_from_frame_sequence(self, job: RenderJob, previous_frame_seen: float | None) -> None:
         if job.runtime.allframesatonce_enabled is not True:
@@ -4645,6 +5655,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.add_job_panel.set_enabled_for_run_state(self.queue_active, create_job_scan_in_progress)
         self.btn_preferences.setEnabled(not scan_in_progress)
+        if hasattr(self, "btn_reload_all_tree") and self.btn_reload_all_tree is not None:
+            self.btn_reload_all_tree.setEnabled(hbatch_ok and not scan_in_progress and not self._render_job_active() and not path_sync_in_progress)
 
         has_queued = any(self._is_job_runnable(j) for j in self.jobs)
         selected = self._selected_job()
@@ -4666,6 +5678,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         selected = self._selected_job()
         self.btn_open_log_file.setEnabled(bool(selected and selected.log_file_path))
+        self._update_job_properties_panel()
 
         if running:
             self._set_status_message("Rendering...")
@@ -4675,6 +5688,20 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_status_message("Scanning /out ...")
         elif path_sync_in_progress:
             self._set_status_message("Updating path...")
+
+    def _reload_all_jobs_from_files(self) -> None:
+        if self._scan_in_progress():
+            return
+        target_jobs = [job for job in self.jobs if job.runtime.status != JobStatus.RUNNING]
+        if not target_jobs:
+            self._set_status_message("No jobs to reload from file.", 3000)
+            return
+        self._defer_reload_jobs_from_file(
+            target_jobs,
+            reset_override_to_rop=False,
+            status_text="Reloading all jobs from file...",
+            notification_label="Reload All",
+        )
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if self._render_job_active():

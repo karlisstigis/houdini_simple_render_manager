@@ -32,6 +32,16 @@ def _strict_trange_flag(node):
         label = ""
     return 1 if ("strict" in token.lower() or "strict" in label.lower()) else 0
 
+
+def _allframesatonce_flag(node):
+    p = node.parm("allframesatonce")
+    if p is None:
+        return 0
+    try:
+        return 1 if int(p.eval()) else 0
+    except Exception:
+        return 0
+
 def _evalf(name):
     p = n.parm(name)
     return float(p.eval()) if p is not None else None
@@ -168,12 +178,21 @@ def _resolve_output_sample_path(raw_path, sample_frame):
         return s
     if s.lower() == "ip":
         return s
+    text_api = getattr(hou, "text", None)
+    expand_at_frame = getattr(text_api, "expandStringAtFrame", None)
+    expand_string = getattr(text_api, "expandString", None)
     try:
         # Expands Houdini variables/token expressions where supported.
-        s = hou.expandStringAtFrame(s, float(sample_frame))
+        if callable(expand_at_frame):
+            s = expand_at_frame(s, float(sample_frame))
+        else:
+            s = hou.expandStringAtFrame(s, float(sample_frame))
     except Exception:
         try:
-            s = hou.expandString(s)
+            if callable(expand_string):
+                s = expand_string(s)
+            else:
+                s = hou.expandString(s)
         except Exception:
             pass
     s = _expand_frame_tokens(s, sample_frame)
@@ -181,6 +200,7 @@ def _resolve_output_sample_path(raw_path, sample_frame):
 
 
 print(f"__HSRM_TRANGE_STRICT__|{_strict_trange_flag(n)}")
+print(f"__HSRM_ALLFRAMESATONCE__|{_allframesatonce_flag(n)}")
 f1 = _evalf("f1")
 f2 = _evalf("f2")
 f3 = _evalf("f3")

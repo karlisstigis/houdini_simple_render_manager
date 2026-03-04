@@ -34,6 +34,16 @@ def _is_strict_frame_range(node):
     return "strict" in token.lower() or "strict" in label.lower()
 
 
+def _allframesatonce_enabled(node):
+    p = node.parm("allframesatonce")
+    if p is None:
+        return False
+    try:
+        return bool(int(p.eval()))
+    except Exception:
+        return False
+
+
 def _looks_like_output_path(text):
     s = str(text or "").strip()
     if not s:
@@ -179,10 +189,11 @@ def main():
                 type_name = ""
                 category = ""
             strict_flag = "1" if _is_strict_frame_range(node) else "0"
+            allframes_flag = "1" if _allframesatonce_enabled(node) else "0"
             out_path = _find_output_path(node)
             rf1, rf2, rf3 = _frame_range_triplet(node)
             print(
-                "__HSRM_NODE__|%s|%s|%s|%s|%s|%s|%s|%s"
+                "__HSRM_NODE__|%s|%s|%s|%s|%s|%s|%s|%s|%s"
                 % (
                     _safe_text(path),
                     _safe_text(category),
@@ -192,6 +203,7 @@ def main():
                     "" if rf1 is None else _safe_text(rf1),
                     "" if rf2 is None else _safe_text(rf2),
                     "" if rf3 is None else _safe_text(rf3),
+                    allframes_flag,
                 )
             )
     print("__HSRM_SCAN_END__")

@@ -104,7 +104,7 @@ def parse_scan_output(stdout: str) -> list[dict[str, Any]]:
             continue
         if not in_block or not line.startswith("__HSRM_NODE__|"):
             continue
-        parts = line.split("|", 8)
+        parts = line.split("|", 9)
         if len(parts) < 4:
             continue
         _, path, category, type_name = parts[:4]
@@ -113,6 +113,7 @@ def parse_scan_output(stdout: str) -> list[dict[str, Any]]:
         rf1_text = parts[6] if len(parts) >= 7 else ""
         rf2_text = parts[7] if len(parts) >= 8 else ""
         rf3_text = parts[8] if len(parts) >= 9 else ""
+        allframes_text = parts[9] if len(parts) >= 10 else ""
         if not (path.startswith("/out/") or path.startswith("/stage/")):
             continue
         try:
@@ -137,6 +138,7 @@ def parse_scan_output(stdout: str) -> list[dict[str, Any]]:
                 "runtime_start_frame": rf1,
                 "runtime_end_frame": rf2,
                 "runtime_step": rf3,
+                "all_frames_single_process": None if allframes_text == "" else (allframes_text in {"1", "true", "True"}),
             }
         )
     return records

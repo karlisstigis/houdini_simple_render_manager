@@ -49,6 +49,55 @@ class FrameHandlingMode(str, Enum):
         return cls.RENDER_MISSING
 
 
+class DeviceOverrideMode(str, Enum):
+    DEFAULT = "default"
+    CPU = "cpu"
+    ALL_GPUS = "all_gpus"
+    SPECIFIC_GPUS = "specific_gpus"
+
+    @classmethod
+    def coerce(cls, value: str | None) -> "DeviceOverrideMode":
+        if isinstance(value, cls):
+            return value
+        txt = str(value or "").strip().lower()
+        for mode in cls:
+            if mode.value == txt:
+                return mode
+        return cls.DEFAULT
+
+    def label(self) -> str:
+        if self is DeviceOverrideMode.CPU:
+            return "CPU"
+        if self is DeviceOverrideMode.ALL_GPUS:
+            return "All GPUs"
+        if self is DeviceOverrideMode.SPECIFIC_GPUS:
+            return "Specific GPU(s)"
+        return "Default"
+
+
+class UsdOutputDirectoryMode(str, Enum):
+    DEFAULT_TEMP = "default_temp"
+    PROJECT_PATH = "project_path"
+    CUSTOM_PATH = "custom_path"
+
+    @classmethod
+    def coerce(cls, value: str | None) -> "UsdOutputDirectoryMode":
+        if isinstance(value, cls):
+            return value
+        txt = str(value or "").strip().lower()
+        for mode in cls:
+            if mode.value == txt:
+                return mode
+        return cls.DEFAULT_TEMP
+
+    def label(self) -> str:
+        if self is UsdOutputDirectoryMode.PROJECT_PATH:
+            return "Project Path"
+        if self is UsdOutputDirectoryMode.CUSTOM_PATH:
+            return "Custom Path"
+        return "Default (TEMP)"
+
+
 @dataclass
 class RenderJobSpec:
     hip_path: str
@@ -61,6 +110,13 @@ class RenderJobSpec:
     enabled: bool = True
     frame_handling_mode: FrameHandlingMode = FrameHandlingMode.RENDER_MISSING
     strict_frame_range: bool = False
+    device_override_mode: DeviceOverrideMode = DeviceOverrideMode.DEFAULT
+    device_selection: str = ""
+    render_all_frames_single_process: bool = False
+    retain_built_usd: bool = False
+    reuse_retained_usd: bool = False
+    usd_output_directory_mode: UsdOutputDirectoryMode = UsdOutputDirectoryMode.DEFAULT_TEMP
+    usd_output_directory_custom_path: str = ""
     id: str = field(default_factory=lambda: uuid4().hex)
 
 
@@ -93,6 +149,14 @@ class RenderJobRuntime:
     chunk_retry_count_runtime: int = 0
     chunk_ranges_runtime: list[tuple[int, int, int]] = field(default_factory=list)
     chunk_retry_total_failures_runtime: int = 0
+    retained_usd_path: str = ""
+    retained_usd_exists: bool = False
+    retained_usd_reusable: bool = False
+    retained_usd_verified: bool = False
+    retained_usd_build_start_frame: int | None = None
+    retained_usd_build_end_frame: int | None = None
+    retained_usd_build_step: int | None = None
+    retained_usd_metadata_pending_write: bool = False
 
 
 @dataclass
@@ -124,6 +188,13 @@ _SPEC_FIELDS = {
     "enabled",
     "frame_handling_mode",
     "strict_frame_range",
+    "device_override_mode",
+    "device_selection",
+    "render_all_frames_single_process",
+    "retain_built_usd",
+    "reuse_retained_usd",
+    "usd_output_directory_mode",
+    "usd_output_directory_custom_path",
     "id",
 }
 _RUNTIME_FIELDS = {
@@ -154,6 +225,13 @@ _RUNTIME_FIELDS = {
     "chunk_retry_count_runtime",
     "chunk_ranges_runtime",
     "chunk_retry_total_failures_runtime",
+    "retained_usd_path",
+    "retained_usd_exists",
+    "retained_usd_reusable",
+    "retained_usd_verified",
+    "retained_usd_build_start_frame",
+    "retained_usd_build_end_frame",
+    "retained_usd_build_step",
 }
 _VIEW_FIELDS = {
     "progress_text",
@@ -186,6 +264,13 @@ class RenderJob:
         status: JobStatus = JobStatus.QUEUED,
         enabled: bool = True,
         frame_handling_mode: FrameHandlingMode = FrameHandlingMode.RENDER_MISSING,
+        device_override_mode: DeviceOverrideMode = DeviceOverrideMode.DEFAULT,
+        device_selection: str = "",
+        render_all_frames_single_process: bool = False,
+        retain_built_usd: bool = False,
+        reuse_retained_usd: bool = False,
+        usd_output_directory_mode: UsdOutputDirectoryMode = UsdOutputDirectoryMode.DEFAULT_TEMP,
+        usd_output_directory_custom_path: str = "",
         created_at: datetime | None = None,
         id: str | None = None,
     ) -> None:
@@ -202,6 +287,13 @@ class RenderJob:
                 name=name,
                 enabled=enabled,
                 frame_handling_mode=frame_handling_mode,
+                device_override_mode=device_override_mode,
+                device_selection=str(device_selection or "").strip(),
+                render_all_frames_single_process=bool(render_all_frames_single_process),
+                retain_built_usd=bool(retain_built_usd),
+                reuse_retained_usd=bool(reuse_retained_usd),
+                usd_output_directory_mode=UsdOutputDirectoryMode.coerce(usd_output_directory_mode.value if isinstance(usd_output_directory_mode, UsdOutputDirectoryMode) else usd_output_directory_mode),
+                usd_output_directory_custom_path=str(usd_output_directory_custom_path or "").strip(),
                 id=str(id or uuid4().hex),
             ),
         )
@@ -296,3 +388,52 @@ class RenderJob:
 
     def frame_handling_label(self) -> str:
         return self.spec.frame_handling_mode.label()
+
+    @staticmethod
+    def normalize_device_selection(value: str | None) -> str:
+        parts = [part.strip() for part in str(value or "").split(",")]
+        seen: list[str] = []
+        for part in parts:
+            if not part:
+                continue
+            normalized = ""
+            if part.isdigit():
+                normalized = part
+            elif part.lower() == "cpu":
+                normalized = "cpu"
+            if normalized and normalized not in seen:
+                seen.append(normalized)
+        return ",".join(seen)
+
+    def effective_device_mode(
+        self,
+        default_mode: DeviceOverrideMode,
+    ) -> DeviceOverrideMode:
+        mode = DeviceOverrideMode.coerce(self.spec.device_override_mode.value if isinstance(self.spec.device_override_mode, DeviceOverrideMode) else self.spec.device_override_mode)
+        if mode is DeviceOverrideMode.DEFAULT:
+            return DeviceOverrideMode.coerce(default_mode.value if isinstance(default_mode, DeviceOverrideMode) else default_mode)
+        return mode
+
+    def effective_device_selection(self, default_selection: str) -> str:
+        mode = DeviceOverrideMode.coerce(self.spec.device_override_mode.value if isinstance(self.spec.device_override_mode, DeviceOverrideMode) else self.spec.device_override_mode)
+        if mode is DeviceOverrideMode.DEFAULT:
+            return self.normalize_device_selection(default_selection)
+        return self.normalize_device_selection(self.spec.device_selection)
+
+    def device_summary(self, default_mode: DeviceOverrideMode, default_selection: str = "") -> str:
+        override_mode = DeviceOverrideMode.coerce(self.spec.device_override_mode.value if isinstance(self.spec.device_override_mode, DeviceOverrideMode) else self.spec.device_override_mode)
+        effective_mode = self.effective_device_mode(default_mode)
+        effective_selection = self.effective_device_selection(default_selection)
+        if override_mode is DeviceOverrideMode.DEFAULT:
+            if effective_mode is DeviceOverrideMode.SPECIFIC_GPUS and effective_selection:
+                return f"Default ({effective_selection})"
+            return f"Default ({effective_mode.label()})"
+        if effective_mode is DeviceOverrideMode.SPECIFIC_GPUS and effective_selection:
+            labels = []
+            for token in effective_selection.split(","):
+                token = token.strip().lower()
+                if not token:
+                    continue
+                labels.append("CPU" if token == "cpu" else token)
+            return ",".join(labels) if labels else effective_mode.label()
+        return effective_mode.label()

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from queue_models import FrameHandlingMode, JobStatus, RenderJob
+from queue_models import DeviceOverrideMode, FrameHandlingMode, JobStatus, RenderJob, UsdOutputDirectoryMode
 from queue_persistence import (
     apply_job_order,
     apply_job_states,
@@ -34,6 +34,17 @@ class QueuePersistenceTests(unittest.TestCase):
         job.runtime.runtime_start_frame = 1001
         job.runtime.runtime_end_frame = 1010
         job.runtime.runtime_step = 2
+        job.spec.device_override_mode = DeviceOverrideMode.SPECIFIC_GPUS
+        job.spec.device_selection = "0,1"
+        job.spec.render_all_frames_single_process = True
+        job.spec.retain_built_usd = True
+        job.spec.reuse_retained_usd = False
+        job.spec.usd_output_directory_mode = UsdOutputDirectoryMode.CUSTOM_PATH
+        job.spec.usd_output_directory_custom_path = "E:/cache/usd"
+        job.runtime.retained_usd_path = "E:/cache/job.usdc"
+        job.runtime.retained_usd_exists = True
+        job.runtime.retained_usd_reusable = True
+        job.runtime.retained_usd_verified = True
         cloned = job_from_persisted_dict(job_to_persisted_dict(job))
         self.assertIsNotNone(cloned)
         assert cloned is not None
@@ -43,6 +54,44 @@ class QueuePersistenceTests(unittest.TestCase):
         self.assertEqual(cloned.runtime.status, job.runtime.status)
         self.assertEqual(cloned.spec.frame_handling_mode, job.spec.frame_handling_mode)
         self.assertEqual(cloned.runtime.error_summary, "boom")
+        self.assertEqual(cloned.spec.device_override_mode, DeviceOverrideMode.SPECIFIC_GPUS)
+        self.assertEqual(cloned.spec.device_selection, "0,1")
+        self.assertTrue(cloned.spec.render_all_frames_single_process)
+        self.assertTrue(cloned.spec.retain_built_usd)
+        self.assertFalse(cloned.spec.reuse_retained_usd)
+        self.assertEqual(cloned.spec.usd_output_directory_mode, UsdOutputDirectoryMode.CUSTOM_PATH)
+        self.assertEqual(cloned.spec.usd_output_directory_custom_path, "E:/cache/usd")
+        self.assertEqual(cloned.runtime.retained_usd_path, "E:/cache/job.usdc")
+        self.assertTrue(cloned.runtime.retained_usd_exists)
+        self.assertTrue(cloned.runtime.retained_usd_verified)
+
+    def test_unverified_retained_usd_is_cleared_on_load(self) -> None:
+        payload = {
+            "hip_path": "E:/shot/test.hip",
+            "rop_path": "/out/mantra1",
+            "frame_range_mode": "use_rop",
+            "retained_usd_path": "E:/random/old.usd",
+            "retained_usd_exists": True,
+            "retained_usd_reusable": True,
+        }
+        cloned = job_from_persisted_dict(payload)
+        self.assertIsNotNone(cloned)
+        assert cloned is not None
+        self.assertEqual(cloned.runtime.retained_usd_path, "")
+        self.assertFalse(cloned.runtime.retained_usd_exists)
+        self.assertFalse(cloned.runtime.retained_usd_reusable)
+
+    def test_old_payload_uses_runtime_allframesatonce_for_single_process_render(self) -> None:
+        payload = {
+            "hip_path": "E:/shot/test.hip",
+            "rop_path": "/out/mantra1",
+            "frame_range_mode": "use_rop",
+            "allframesatonce_enabled": True,
+        }
+        cloned = job_from_persisted_dict(payload)
+        self.assertIsNotNone(cloned)
+        assert cloned is not None
+        self.assertTrue(cloned.spec.render_all_frames_single_process)
 
     def test_running_job_loads_back_as_canceled(self) -> None:
         job = RenderJob(hip_path="E:/shot/test.hip", rop_path="/out/mantra1", frame_range_mode="use_rop", status=JobStatus.RUNNING)

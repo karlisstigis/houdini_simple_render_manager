@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from queue_models import DeviceOverrideMode, UsdOutputDirectoryMode
 from queue_table_model import PATH_SYNC_LOCKED_ROLE
 from theme_support import DEFAULT_THEME
 
@@ -133,6 +134,38 @@ class PanelFrame(QtWidgets.QFrame):
         self._body_layout.setContentsMargins(left, top, right, bottom)
 
 
+class CollapsibleSection(QtWidgets.QWidget):
+    def __init__(self, title: str, content: QtWidgets.QWidget, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("collapsibleSection")
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Maximum)
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(6)
+
+        self.toggle_button = QtWidgets.QToolButton(self)
+        self.toggle_button.setObjectName("collapsibleSectionHeader")
+        self.toggle_button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.toggle_button.setText(title)
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(True)
+        self.toggle_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.toggle_button.setArrowType(QtCore.Qt.ArrowType.DownArrow)
+        self.toggle_button.clicked.connect(self._on_toggled)
+        root.addWidget(self.toggle_button)
+
+        self.content = content
+        root.addWidget(content)
+
+    def _on_toggled(self, checked: bool) -> None:
+        self.toggle_button.setArrowType(QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow)
+        self.content.setVisible(checked)
+
+    def setExpanded(self, expanded: bool) -> None:
+        self.toggle_button.setChecked(bool(expanded))
+        self._on_toggled(bool(expanded))
+
+
 class ColorPickerButton(QtWidgets.QPushButton):
     color_changed = QtCore.Signal(str)
 
@@ -177,6 +210,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         player_path: str,
         theme: dict[str, str],
         runtime_defaults: dict[str, Any],
+        device_defaults: dict[str, Any],
         logs_dir: str,
         discover_hbatch_fn: Callable[[], str],
         safe_message_fn: Callable[[QtWidgets.QWidget, str, str, str | None], None],
@@ -189,9 +223,17 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._safe_message_fn = safe_message_fn
         self._theme_buttons: dict[str, ColorPickerButton] = {}
         self._logs_dir = Path(logs_dir)
-        self._build_ui(hbatch_path, player_path, theme, runtime_defaults, logs_dir)
+        self._build_ui(hbatch_path, player_path, theme, runtime_defaults, device_defaults, logs_dir)
 
-    def _build_ui(self, hbatch_path: str, player_path: str, theme: dict[str, str], runtime_defaults: dict[str, Any], logs_dir: str) -> None:
+    def _build_ui(
+        self,
+        hbatch_path: str,
+        player_path: str,
+        theme: dict[str, str],
+        runtime_defaults: dict[str, Any],
+        device_defaults: dict[str, Any],
+        logs_dir: str,
+    ) -> None:
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
@@ -391,6 +433,60 @@ class PreferencesDialog(QtWidgets.QDialog):
         runtime_layout.addWidget(self.spin_default_retry_delay, 3, 2)
         runtime_panel = PanelFrame("Queue Runtime Defaults", runtime_host)
 
+        device_host = QtWidgets.QWidget()
+        device_host.setObjectName("transparentHost")
+        device_layout = QtWidgets.QGridLayout(device_host)
+        _configure_pref_grid(device_layout, 5)
+        self.default_device_mode = QtWidgets.QComboBox()
+        for mode in (
+            DeviceOverrideMode.DEFAULT,
+            DeviceOverrideMode.CPU,
+            DeviceOverrideMode.ALL_GPUS,
+            DeviceOverrideMode.SPECIFIC_GPUS,
+        ):
+            self.default_device_mode.addItem(mode.label(), mode.value)
+        current_default_mode = DeviceOverrideMode.coerce(device_defaults.get("mode"))
+        self.default_device_mode.setCurrentIndex(max(0, self.default_device_mode.findData(current_default_mode.value)))
+        self.default_device_selection = QtWidgets.QLineEdit(str(device_defaults.get("selection", "") or ""))
+        self.default_device_selection.setPlaceholderText("GPU ids, e.g. 0,1")
+        self.default_device_selection.setMinimumWidth(control_min_width)
+        self.chk_default_retain_built_usd = QtWidgets.QCheckBox("Enabled")
+        self.chk_default_retain_built_usd.setChecked(bool(device_defaults.get("retain_built_usd", False)))
+        self.default_usd_output_mode = QtWidgets.QComboBox()
+        for mode in (
+            UsdOutputDirectoryMode.DEFAULT_TEMP,
+            UsdOutputDirectoryMode.PROJECT_PATH,
+            UsdOutputDirectoryMode.CUSTOM_PATH,
+        ):
+            self.default_usd_output_mode.addItem(mode.label(), mode.value)
+        current_usd_output_mode = UsdOutputDirectoryMode.coerce(device_defaults.get("usd_output_directory_mode"))
+        self.default_usd_output_mode.setCurrentIndex(max(0, self.default_usd_output_mode.findData(current_usd_output_mode.value)))
+        self.default_usd_output_custom_path = QtWidgets.QLineEdit(str(device_defaults.get("usd_output_directory_custom_path", "") or ""))
+        self.default_usd_output_custom_path.setPlaceholderText("Folder path")
+        self.default_usd_output_custom_path.setMinimumWidth(control_min_width)
+        self.btn_browse_default_usd_output_custom_path = QtWidgets.QPushButton("Browse")
+        self.btn_browse_default_usd_output_custom_path.clicked.connect(self._browse_default_usd_output_custom_path)
+        self.default_device_mode.currentIndexChanged.connect(self._refresh_device_defaults_ui)
+        self.default_usd_output_mode.currentIndexChanged.connect(self._refresh_device_defaults_ui)
+
+        device_layout.addWidget(_runtime_label("Default Device"), 0, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        device_layout.addWidget(self.default_device_mode, 0, 2)
+        device_layout.addWidget(_runtime_label("GPU Selection"), 1, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        device_layout.addWidget(self.default_device_selection, 1, 2)
+        device_layout.addWidget(_runtime_label("Retain Built USD"), 2, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        device_layout.addWidget(self.chk_default_retain_built_usd, 2, 2, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        device_layout.addWidget(_runtime_label("USD Output Directory"), 3, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        device_layout.addWidget(self.default_usd_output_mode, 3, 2)
+        device_layout.addWidget(_runtime_label("USD Custom Path"), 4, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        default_usd_output_row = QtWidgets.QHBoxLayout()
+        default_usd_output_row.setContentsMargins(0, 0, 0, 0)
+        default_usd_output_row.setSpacing(8)
+        default_usd_output_row.addWidget(self.default_usd_output_custom_path, 1)
+        default_usd_output_row.addWidget(self.btn_browse_default_usd_output_custom_path)
+        device_layout.addLayout(default_usd_output_row, 4, 2)
+        self._refresh_device_defaults_ui()
+        device_panel = PanelFrame("Render Device + USD Defaults", device_host)
+
         logs_host = QtWidgets.QWidget()
         logs_host.setObjectName("transparentHost")
         logs_layout = QtWidgets.QVBoxLayout(logs_host)
@@ -510,6 +606,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         scroll_layout.addWidget(settings_panel)
         scroll_layout.addWidget(player_settings_panel)
         scroll_layout.addWidget(runtime_panel)
+        scroll_layout.addWidget(device_panel)
         scroll_layout.addWidget(logs_panel)
         scroll_layout.addWidget(theme_panel)
         scroll_layout.addStretch(1)
@@ -547,6 +644,17 @@ class PreferencesDialog(QtWidgets.QDialog):
         )
         if path:
             self.player_edit.setText(path)
+
+    def _browse_default_usd_output_custom_path(self) -> None:
+        current = self.default_usd_output_custom_path.text().strip()
+        start_dir = current if current else str(Path.home())
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select USD Output Folder",
+            start_dir,
+        )
+        if path:
+            self.default_usd_output_custom_path.setText(path)
 
     def _update_hbatch_status_label(self) -> None:
         path = self.hbatch_edit.text().strip()
@@ -603,6 +711,14 @@ class PreferencesDialog(QtWidgets.QDialog):
     def _emit_apply(self) -> None:
         self.applied.emit(self.values())
 
+    def _refresh_device_defaults_ui(self) -> None:
+        mode = DeviceOverrideMode.coerce(self.default_device_mode.currentData())
+        self.default_device_selection.setEnabled(mode is DeviceOverrideMode.SPECIFIC_GPUS)
+        usd_mode = UsdOutputDirectoryMode.coerce(self.default_usd_output_mode.currentData())
+        enable_custom_usd_path = usd_mode is UsdOutputDirectoryMode.CUSTOM_PATH
+        self.default_usd_output_custom_path.setEnabled(enable_custom_usd_path)
+        self.btn_browse_default_usd_output_custom_path.setEnabled(enable_custom_usd_path)
+
     def values(self) -> dict[str, Any]:
         theme = {key: btn.color_hex() for key, btn in self._theme_buttons.items()}
         theme["panel_gap"] = int(self.panel_gap_spin.value())
@@ -616,8 +732,412 @@ class PreferencesDialog(QtWidgets.QDialog):
                 "retry_count": int(self.spin_default_retry_count.value()),
                 "retry_delay": int(self.spin_default_retry_delay.value()),
             },
+            "device_defaults": {
+                "mode": str(self.default_device_mode.currentData() or DeviceOverrideMode.DEFAULT.value),
+                "selection": self.default_device_selection.text().strip(),
+                "retain_built_usd": bool(self.chk_default_retain_built_usd.isChecked()),
+                "usd_output_directory_mode": str(self.default_usd_output_mode.currentData() or UsdOutputDirectoryMode.DEFAULT_TEMP.value),
+                "usd_output_directory_custom_path": self.default_usd_output_custom_path.text().strip(),
+            },
             "theme": theme,
         }
+
+
+class JobPropertiesPanel(QtWidgets.QWidget):
+    device_mode_changed = QtCore.Signal(str)
+    device_selection_changed = QtCore.Signal(str)
+    render_all_frames_single_process_changed = QtCore.Signal(bool)
+    retain_built_usd_changed = QtCore.Signal(bool)
+    reuse_retained_usd_changed = QtCore.Signal(bool)
+    usd_output_directory_mode_changed = QtCore.Signal(str)
+    usd_output_directory_custom_path_changed = QtCore.Signal(str)
+    reveal_retained_usd_requested = QtCore.Signal()
+    delete_retained_usd_requested = QtCore.Signal()
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._syncing = False
+        self._device_option_checks: list[tuple[str, QtWidgets.QCheckBox]] = []
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        def _label(text: str) -> QtWidgets.QLabel:
+            label = QtWidgets.QLabel(text)
+            label.setObjectName("parameterLabel")
+            return label
+
+        def _hline() -> QtWidgets.QFrame:
+            line = QtWidgets.QFrame()
+            line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+            line.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
+            line.setObjectName("jobPropertiesSeparator")
+            line.setFixedHeight(1)
+            return line
+
+        def _value_label() -> QtWidgets.QLabel:
+            label = QtWidgets.QLabel("-")
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+            return label
+
+        info_grid = QtWidgets.QGridLayout()
+        info_grid.setContentsMargins(12, 10, 8, 0)
+        info_grid.setHorizontalSpacing(10)
+        info_grid.setVerticalSpacing(8)
+        info_grid.setColumnStretch(1, 1)
+        layout.addLayout(info_grid)
+
+        row = 0
+        info_grid.addWidget(_label("Name"), row, 0)
+        self.name_value = _value_label()
+        info_grid.addWidget(self.name_value, row, 1)
+        row += 1
+
+        info_grid.addWidget(_label("File"), row, 0)
+        self.file_value = _value_label()
+        info_grid.addWidget(self.file_value, row, 1)
+        row += 1
+
+        info_grid.addWidget(_label("ROP"), row, 0)
+        self.rop_value = _value_label()
+        info_grid.addWidget(self.rop_value, row, 1)
+
+        usd_host = QtWidgets.QWidget()
+        usd_host.setObjectName("transparentHost")
+        retain_grid = QtWidgets.QGridLayout(usd_host)
+        retain_grid.setContentsMargins(12, 0, 8, 0)
+        retain_grid.setHorizontalSpacing(10)
+        retain_grid.setVerticalSpacing(8)
+        retain_grid.setColumnStretch(1, 1)
+
+        row = 0
+        self.single_process_render_check = QtWidgets.QCheckBox("Render All Frames with a Single Process")
+        self.single_process_render_check.setTristate(False)
+        self.single_process_render_check.clicked.connect(self._emit_single_process_render_clicked)
+        retain_grid.addWidget(self.single_process_render_check, row, 0, 1, 2, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        row += 1
+
+        self.retain_usd_check = QtWidgets.QCheckBox("Keep USD files")
+        self.retain_usd_check.setTristate(False)
+        self.retain_usd_check.clicked.connect(self._emit_retain_usd_clicked)
+        retain_grid.addWidget(self.retain_usd_check, row, 0, 1, 2, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        row += 1
+
+        self.reuse_usd_check = QtWidgets.QCheckBox("Use existing USD files")
+        self.reuse_usd_check.setTristate(False)
+        self.reuse_usd_check.clicked.connect(self._emit_reuse_usd_clicked)
+        retain_grid.addWidget(self.reuse_usd_check, row, 0, 1, 2, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        row += 1
+
+        retain_grid.addWidget(_label("USD Output Directory"), row, 0)
+        self.usd_output_mode_combo = QtWidgets.QComboBox()
+        self.usd_output_mode_combo.addItem(UsdOutputDirectoryMode.DEFAULT_TEMP.label(), UsdOutputDirectoryMode.DEFAULT_TEMP.value)
+        self.usd_output_mode_combo.addItem(UsdOutputDirectoryMode.PROJECT_PATH.label(), UsdOutputDirectoryMode.PROJECT_PATH.value)
+        self.usd_output_mode_combo.addItem(UsdOutputDirectoryMode.CUSTOM_PATH.label(), UsdOutputDirectoryMode.CUSTOM_PATH.value)
+        if hasattr(self.usd_output_mode_combo, "setPlaceholderText"):
+            self.usd_output_mode_combo.setPlaceholderText("Mixed")
+        self.usd_output_mode_combo.currentIndexChanged.connect(self._emit_usd_output_directory_mode_changed)
+        retain_grid.addWidget(self.usd_output_mode_combo, row, 1)
+        row += 1
+
+        self.usd_output_custom_path_label = _label("Custom USD Path")
+        retain_grid.addWidget(self.usd_output_custom_path_label, row, 0)
+        usd_output_custom_path_row = QtWidgets.QHBoxLayout()
+        usd_output_custom_path_row.setContentsMargins(0, 0, 0, 0)
+        usd_output_custom_path_row.setSpacing(8)
+        self.usd_output_custom_path_value = QtWidgets.QLineEdit()
+        self.usd_output_custom_path_value.setPlaceholderText("Folder path")
+        self.usd_output_custom_path_value.editingFinished.connect(self._emit_usd_output_directory_custom_path_changed)
+        usd_output_custom_path_row.addWidget(self.usd_output_custom_path_value, 1)
+        self.btn_browse_usd_output_custom_path = QtWidgets.QPushButton("Browse")
+        self.btn_browse_usd_output_custom_path.clicked.connect(self._browse_usd_output_custom_path)
+        usd_output_custom_path_row.addWidget(self.btn_browse_usd_output_custom_path)
+        self.usd_output_custom_path_host = QtWidgets.QWidget()
+        self.usd_output_custom_path_host.setObjectName("transparentHost")
+        self.usd_output_custom_path_host.setLayout(usd_output_custom_path_row)
+        retain_grid.addWidget(self.usd_output_custom_path_host, row, 1)
+        row += 1
+
+        retain_grid.addWidget(_hline(), row, 0, 1, 2)
+        row += 1
+
+        retain_grid.addWidget(_label("Status"), row, 0)
+        self.retained_usd_status = QtWidgets.QLabel("-")
+        self.retained_usd_status.setWordWrap(True)
+        retain_grid.addWidget(self.retained_usd_status, row, 1)
+        row += 1
+
+        self.retained_usd_warning_label = _label("Warning")
+        self.retained_usd_warning_label.setVisible(False)
+        retain_grid.addWidget(self.retained_usd_warning_label, row, 0, alignment=QtCore.Qt.AlignmentFlag.AlignTop)
+        self.retained_usd_warning = QtWidgets.QLabel("")
+        self.retained_usd_warning.setWordWrap(True)
+        self.retained_usd_warning.setVisible(False)
+        retain_grid.addWidget(self.retained_usd_warning, row, 1)
+        row += 1
+
+        retain_grid.addWidget(_label("Frame Range"), row, 0)
+        self.retained_usd_built_range = QtWidgets.QLabel("-")
+        self.retained_usd_built_range.setWordWrap(True)
+        retain_grid.addWidget(self.retained_usd_built_range, row, 1)
+        row += 1
+
+        retain_grid.addWidget(_label("Step"), row, 0)
+        self.retained_usd_built_step = QtWidgets.QLabel("-")
+        self.retained_usd_built_step.setWordWrap(True)
+        retain_grid.addWidget(self.retained_usd_built_step, row, 1)
+        row += 1
+
+        retain_grid.addWidget(_label("Built At"), row, 0)
+        self.retained_usd_built_at = QtWidgets.QLabel("-")
+        self.retained_usd_built_at.setWordWrap(True)
+        retain_grid.addWidget(self.retained_usd_built_at, row, 1)
+        row += 1
+
+        retain_grid.addWidget(_label("USD Folder"), row, 0)
+        path_row = QtWidgets.QHBoxLayout()
+        path_row.setContentsMargins(0, 0, 0, 0)
+        path_row.setSpacing(8)
+        self.retained_usd_value = QtWidgets.QLineEdit()
+        self.retained_usd_value.setReadOnly(True)
+        self.retained_usd_value.setObjectName("jobPropertiesReadOnlyField")
+        path_row.addWidget(self.retained_usd_value, 1)
+        self.btn_reveal_retained_usd = QtWidgets.QPushButton("Open Folder")
+        self.btn_reveal_retained_usd.clicked.connect(self.reveal_retained_usd_requested.emit)
+        path_row.addWidget(self.btn_reveal_retained_usd)
+        retain_grid.addLayout(path_row, row, 1)
+        row += 1
+
+        actions = QtWidgets.QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(8)
+        self.btn_delete_retained_usd = QtWidgets.QPushButton("Delete")
+        self.btn_delete_retained_usd.clicked.connect(self.delete_retained_usd_requested.emit)
+        actions.addWidget(self.btn_delete_retained_usd)
+        actions.addStretch(1)
+        retain_grid.addLayout(actions, row, 1)
+
+        self.usd_section = CollapsibleSection("USD", usd_host, self)
+        self.usd_section.setExpanded(True)
+        layout.addWidget(self.usd_section)
+
+        device_host = QtWidgets.QWidget()
+        device_host.setObjectName("transparentHost")
+        device_grid = QtWidgets.QGridLayout(device_host)
+        device_grid.setContentsMargins(12, 0, 8, 0)
+        device_grid.setHorizontalSpacing(10)
+        device_grid.setVerticalSpacing(8)
+        device_grid.setColumnStretch(1, 1)
+
+        row = 0
+        device_grid.addWidget(_label("Device"), row, 0)
+        self.device_mode_combo = QtWidgets.QComboBox()
+        self.device_mode_combo.addItem("Default", DeviceOverrideMode.DEFAULT.value)
+        self.device_mode_combo.addItem("GPU All", DeviceOverrideMode.ALL_GPUS.value)
+        self.device_mode_combo.addItem("CPU", DeviceOverrideMode.CPU.value)
+        self.device_mode_combo.addItem("Custom", DeviceOverrideMode.SPECIFIC_GPUS.value)
+        self.device_mode_combo.currentIndexChanged.connect(self._emit_device_mode_changed)
+        device_grid.addWidget(self.device_mode_combo, row, 1)
+        row += 1
+
+        self.device_selection_label = _label("Custom Devices")
+        device_grid.addWidget(self.device_selection_label, row, 0, alignment=QtCore.Qt.AlignmentFlag.AlignTop)
+        self.device_selection_container = QtWidgets.QWidget()
+        self.device_selection_container.setObjectName("transparentHost")
+        self.device_selection_layout = QtWidgets.QVBoxLayout(self.device_selection_container)
+        self.device_selection_layout.setContentsMargins(0, 0, 0, 0)
+        self.device_selection_layout.setSpacing(6)
+        self.device_selection_empty = QtWidgets.QLabel("No render devices detected")
+        self.device_selection_empty.setWordWrap(True)
+        self.device_selection_layout.addWidget(self.device_selection_empty)
+        device_grid.addWidget(self.device_selection_container, row, 1)
+        row += 1
+
+        self.device_section = CollapsibleSection("Device", device_host, self)
+        self.device_section.setExpanded(True)
+        layout.addWidget(self.device_section)
+        layout.addStretch(1)
+
+    @staticmethod
+    def _set_combo_mixed_state(combo: QtWidgets.QComboBox, *, mixed: bool, value: str, fallback_text: str) -> None:
+        mixed_data = "__mixed__"
+        mixed_index = combo.findData(mixed_data)
+        if mixed:
+            if mixed_index < 0:
+                combo.insertItem(0, "Mixed", mixed_data)
+                mixed_index = 0
+            combo.setCurrentIndex(mixed_index)
+            return
+        if mixed_index >= 0:
+            combo.removeItem(mixed_index)
+        target_index = combo.findData(value)
+        combo.setCurrentIndex(target_index if target_index >= 0 else combo.findText(fallback_text))
+
+    def _emit_device_mode_changed(self) -> None:
+        if self._syncing:
+            return
+        self.device_mode_changed.emit(str(self.device_mode_combo.currentData() or DeviceOverrideMode.DEFAULT.value))
+
+    def _emit_device_selection_changed(self) -> None:
+        if self._syncing:
+            return
+        selected_ids = [device_id for device_id, checkbox in self._device_option_checks if checkbox.checkState() == QtCore.Qt.CheckState.Checked]
+        self.device_selection_changed.emit(",".join(selected_ids))
+
+    def _emit_retain_usd_clicked(self, checked: bool) -> None:
+        if self._syncing:
+            return
+        self.retain_built_usd_changed.emit(bool(checked))
+
+    def _emit_single_process_render_clicked(self, checked: bool) -> None:
+        if self._syncing:
+            return
+        self.render_all_frames_single_process_changed.emit(bool(checked))
+
+    def _emit_reuse_usd_clicked(self, checked: bool) -> None:
+        if self._syncing:
+            return
+        self.reuse_retained_usd_changed.emit(bool(checked))
+
+    def _emit_usd_output_directory_mode_changed(self) -> None:
+        if self._syncing:
+            return
+        self.usd_output_directory_mode_changed.emit(str(self.usd_output_mode_combo.currentData() or UsdOutputDirectoryMode.DEFAULT_TEMP.value))
+
+    def _emit_usd_output_directory_custom_path_changed(self) -> None:
+        if self._syncing:
+            return
+        self.usd_output_directory_custom_path_changed.emit(self.usd_output_custom_path_value.text().strip())
+
+    def _browse_usd_output_custom_path(self) -> None:
+        start_dir = self.usd_output_custom_path_value.text().strip() or str(Path.home())
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select USD Output Folder",
+            start_dir,
+        )
+        if path:
+            self.usd_output_custom_path_value.setText(path)
+            self._emit_usd_output_directory_custom_path_changed()
+
+    def _refresh_usd_output_ui(self, *, editable: bool, mixed_mode: bool, single_process_enabled: bool) -> None:
+        mode = UsdOutputDirectoryMode.coerce(self.usd_output_mode_combo.currentData())
+        show_custom_path = (not mixed_mode) and mode is UsdOutputDirectoryMode.CUSTOM_PATH
+        controls_enabled = editable and single_process_enabled
+        self.usd_output_custom_path_label.setVisible(show_custom_path)
+        self.usd_output_custom_path_host.setVisible(show_custom_path)
+        self.usd_output_custom_path_value.setEnabled(controls_enabled and show_custom_path)
+        self.btn_browse_usd_output_custom_path.setEnabled(controls_enabled and show_custom_path)
+
+    @staticmethod
+    def _check_state_value(state: Any) -> int:
+        return int(getattr(state, "value", state))
+
+    def _rebuild_device_option_checks(self, device_options: list[dict[str, Any]], *, editable: bool) -> None:
+        while self.device_selection_layout.count():
+            item = self.device_selection_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._device_option_checks = []
+        if not device_options:
+            self.device_selection_empty = QtWidgets.QLabel("No render devices detected")
+            self.device_selection_empty.setWordWrap(True)
+            self.device_selection_layout.addWidget(self.device_selection_empty)
+            return
+        for option in device_options:
+            checkbox = QtWidgets.QCheckBox(str(option.get("name", "") or "Unnamed Device"))
+            check_state = QtCore.Qt.CheckState(self._check_state_value(option.get("check_state", QtCore.Qt.CheckState.Unchecked)))
+            checkbox.setTristate(check_state == QtCore.Qt.CheckState.PartiallyChecked)
+            checkbox.setCheckState(check_state)
+            checkbox.setEnabled(editable and bool(option.get("enabled", True)))
+            checkbox.clicked.connect(self._emit_device_selection_changed)
+            self.device_selection_layout.addWidget(checkbox)
+            self._device_option_checks.append((str(option.get("id", "") or ""), checkbox))
+        self.device_selection_layout.addStretch(1)
+
+    def set_state(self, state: dict[str, Any]) -> None:
+        self._syncing = True
+        try:
+            self.name_value.setText(str(state.get("name_text", "-") or "-"))
+            self.file_value.setText(str(state.get("file_text", "-") or "-"))
+            self.rop_value.setText(str(state.get("rop_text", "-") or "-"))
+
+            editable = bool(state.get("editable", False))
+            mixed_device_mode = bool(state.get("mixed_device_mode", False))
+            device_mode = DeviceOverrideMode.coerce(state.get("device_mode"))
+            self._set_combo_mixed_state(
+                self.device_mode_combo,
+                mixed=mixed_device_mode,
+                value=device_mode.value,
+                fallback_text="Default",
+            )
+            self.device_mode_combo.setEnabled(editable)
+            show_custom_devices = bool(state.get("show_custom_devices", False))
+            self.device_selection_label.setVisible(show_custom_devices)
+            self.device_selection_container.setVisible(show_custom_devices)
+            self._rebuild_device_option_checks(
+                list(state.get("device_options", []) or []),
+                editable=editable and bool(state.get("device_selection_enabled", False)),
+            )
+
+            single_process_state = self._check_state_value(
+                state.get("single_process_render_check_state", self._check_state_value(QtCore.Qt.CheckState.Unchecked))
+            )
+            self.single_process_render_check.setTristate(
+                single_process_state == self._check_state_value(QtCore.Qt.CheckState.PartiallyChecked)
+            )
+            self.single_process_render_check.setCheckState(QtCore.Qt.CheckState(single_process_state))
+            self.single_process_render_check.setEnabled(editable)
+            single_process_active = single_process_state == self._check_state_value(QtCore.Qt.CheckState.Checked)
+
+            retain_state = self._check_state_value(
+                state.get("retain_check_state", self._check_state_value(QtCore.Qt.CheckState.Unchecked))
+            )
+            self.retain_usd_check.setTristate(retain_state == self._check_state_value(QtCore.Qt.CheckState.PartiallyChecked))
+            self.retain_usd_check.setCheckState(QtCore.Qt.CheckState(retain_state))
+            self.retain_usd_check.setEnabled(editable and single_process_active)
+            reuse_state = self._check_state_value(
+                state.get("reuse_check_state", self._check_state_value(QtCore.Qt.CheckState.Unchecked))
+            )
+            self.reuse_usd_check.setTristate(reuse_state == self._check_state_value(QtCore.Qt.CheckState.PartiallyChecked))
+            self.reuse_usd_check.setCheckState(QtCore.Qt.CheckState(reuse_state))
+            self.reuse_usd_check.setEnabled(editable and single_process_active and bool(state.get("reuse_enabled", True)))
+            mixed_usd_output_mode = bool(state.get("mixed_usd_output_mode", False))
+            usd_output_mode = UsdOutputDirectoryMode.coerce(state.get("usd_output_directory_mode"))
+            self._set_combo_mixed_state(
+                self.usd_output_mode_combo,
+                mixed=mixed_usd_output_mode,
+                value=usd_output_mode.value,
+                fallback_text=UsdOutputDirectoryMode.DEFAULT_TEMP.label(),
+            )
+            self.usd_output_mode_combo.setEnabled(editable and single_process_active)
+            mixed_usd_output_custom_path = bool(state.get("mixed_usd_output_custom_path", False))
+            self.usd_output_custom_path_value.setText("" if mixed_usd_output_custom_path else str(state.get("usd_output_directory_custom_path", "") or ""))
+            self.usd_output_custom_path_value.setPlaceholderText("Mixed" if mixed_usd_output_custom_path else "Folder path")
+            self._refresh_usd_output_ui(
+                editable=editable,
+                mixed_mode=mixed_usd_output_mode,
+                single_process_enabled=single_process_active,
+            )
+
+            self.retained_usd_value.setText(str(state.get("retained_usd_path", "") or ""))
+            self.retained_usd_built_range.setText(str(state.get("retained_usd_built_range", "-") or "-"))
+            self.retained_usd_built_step.setText(str(state.get("retained_usd_built_step", "-") or "-"))
+            self.retained_usd_built_at.setText(str(state.get("retained_usd_built_at", "-") or "-"))
+            self.retained_usd_status.setText(str(state.get("retained_usd_status", "-") or "-"))
+            warning_text = str(state.get("retained_usd_warning", "") or "")
+            self.retained_usd_warning.setText(warning_text)
+            self.retained_usd_warning.setVisible(bool(warning_text))
+            self.retained_usd_warning_label.setVisible(bool(warning_text))
+            self.btn_reveal_retained_usd.setEnabled(bool(state.get("can_open", state.get("can_reveal", False))))
+            self.btn_delete_retained_usd.setEnabled(bool(state.get("can_delete", False)))
+        finally:
+            self._syncing = False
 
 
 class RopListWidget(QtWidgets.QListWidget):
@@ -905,8 +1425,14 @@ class AddJobPanel(QtWidgets.QGroupBox):
             rec.get("runtime_step"),
         )
 
+    def rop_all_frames_single_process_for_path(self, rop_path: str) -> bool:
+        rec = self._rop_scan_meta.get((rop_path or "").strip())
+        return bool(rec and rec.get("all_frames_single_process"))
+
     def set_scanned_rops(self, rop_records: list[dict[str, Any]]) -> None:
         selected_before = set(self.selected_rop_paths())
+        current_before = self.current_rop_path()
+        scroll_before = self.rop_list.verticalScrollBar().value() if self.rop_list.verticalScrollBar() is not None else 0
         for rec in rop_records:
             path_key = str(rec.get("path", "")).strip()
             if path_key:
@@ -923,11 +1449,20 @@ class AddJobPanel(QtWidgets.QGroupBox):
             self.rop_list.addItem(item)
             if path in selected_before:
                 item.setSelected(True)
+            if current_before and path == current_before:
+                self.rop_list.setCurrentItem(item)
             if first_item is None:
                 first_item = item
         if self.rop_list.selectedItems() == [] and first_item is not None:
             first_item.setSelected(True)
+            if self.rop_list.currentItem() is None:
+                self.rop_list.setCurrentItem(first_item)
         self.rop_list.blockSignals(False)
+        if self.rop_list.verticalScrollBar() is not None:
+            self.rop_list.verticalScrollBar().setValue(scroll_before)
+        current_item = self.rop_list.currentItem()
+        if current_item is not None:
+            self.rop_list.scrollToItem(current_item, QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter)
         self._refresh_override_warning()
 
     def _current_rop_scan_record(self) -> dict[str, Any] | None:
@@ -974,6 +1509,15 @@ class AddJobPanel(QtWidgets.QGroupBox):
         rec["runtime_start_frame"] = start_frame
         rec["runtime_end_frame"] = end_frame
         rec["runtime_step"] = step
+        self._rop_scan_meta[rop_path] = rec
+
+    def set_rop_all_frames_single_process_hint(self, rop_path: str, enabled: bool) -> None:
+        rop_path = (rop_path or "").strip()
+        if not rop_path:
+            return
+        rec = dict(self._rop_scan_meta.get(rop_path, {}))
+        rec["path"] = rop_path
+        rec["all_frames_single_process"] = bool(enabled)
         self._rop_scan_meta[rop_path] = rec
 
     def _refresh_override_warning(self, *_args: object) -> None:
@@ -1999,7 +2543,11 @@ class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
             self._paint_offline_stripes(painter, opt.rect)
         self._paint_path_sync_overlay(painter, opt.rect, opt.widget, locked=locked)
         widget = opt.widget
-        fg = QtGui.QColor(getattr(widget, "combo_text_color", QtGui.QColor("#ffffff")))
+        fg_brush = index.data(QtCore.Qt.ItemDataRole.ForegroundRole)
+        if isinstance(fg_brush, QtGui.QBrush):
+            fg = QtGui.QColor(fg_brush.color())
+        else:
+            fg = QtGui.QColor(getattr(widget, "combo_text_color", QtGui.QColor("#ffffff")))
         rect = opt.rect
         arrow_w = 18
         left_pad = 6

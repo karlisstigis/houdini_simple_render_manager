@@ -18,7 +18,7 @@ def build_queue_tree_panel(
     parent: QtWidgets.QWidget,
     *,
     item_changed_handler: Any,
-) -> tuple[QtWidgets.QWidget, QueueTreeView, QtGui.QStandardItemModel]:
+) -> tuple[QtWidgets.QWidget, QueueTreeView, QtGui.QStandardItemModel, QtWidgets.QPushButton]:
     box = QtWidgets.QGroupBox("Tree view")
     layout = QtWidgets.QVBoxLayout(box)
     layout.setContentsMargins(0, 0, 0, 0)
@@ -50,13 +50,23 @@ def build_queue_tree_panel(
     queue_tree_model.itemChanged.connect(item_changed_handler)
     tree_layout.addWidget(queue_tree, 1)
 
+    footer = QtWidgets.QWidget()
+    footer.setObjectName("transparentHost")
+    footer_layout = QtWidgets.QHBoxLayout(footer)
+    footer_layout.setContentsMargins(8, 8, 8, 8)
+    footer_layout.setSpacing(8)
+    footer_layout.addStretch(1)
+    reload_all_button = QtWidgets.QPushButton("Reload All")
+    footer_layout.addWidget(reload_all_button)
+    tree_layout.addWidget(footer)
+
     layout.addWidget(queue_tree_frame, 1)
 
     box.setObjectName("panelEmbeddedGroup")
     box.setTitle("")
     panel = PanelFrame("Tree view", box)
     panel.set_body_margins(0, 0, 0, 0)
-    return panel, queue_tree, queue_tree_model
+    return panel, queue_tree, queue_tree_model, reload_all_button
 
 
 def refresh_queue_tree_model(

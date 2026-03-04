@@ -5,7 +5,16 @@ from pathlib import Path
 from typing import Any
 
 from atomic_io import read_json_file, write_json_atomic
-from queue_models import FrameHandlingMode, JobStatus, RenderJob
+from queue_models import DeviceOverrideMode, FrameHandlingMode, JobStatus, RenderJob, UsdOutputDirectoryMode
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
 
 
 def job_to_persisted_dict(job: RenderJob) -> dict[str, Any]:
@@ -21,6 +30,13 @@ def job_to_persisted_dict(job: RenderJob) -> dict[str, Any]:
         "status": job.runtime.status.value,
         "enabled": job.spec.enabled,
         "frame_handling_mode": job.spec.frame_handling_mode.value,
+        "device_override_mode": job.spec.device_override_mode.value,
+        "device_selection": job.spec.device_selection,
+        "render_all_frames_single_process": job.spec.render_all_frames_single_process,
+        "retain_built_usd": job.spec.retain_built_usd,
+        "reuse_retained_usd": job.spec.reuse_retained_usd,
+        "usd_output_directory_mode": job.spec.usd_output_directory_mode.value,
+        "usd_output_directory_custom_path": job.spec.usd_output_directory_custom_path,
         "exit_code": job.runtime.exit_code,
         "log_file_path": job.runtime.log_file_path,
         "error_summary": job.runtime.error_summary,
@@ -37,6 +53,13 @@ def job_to_persisted_dict(job: RenderJob) -> dict[str, Any]:
         "chunk_retry_count_runtime": job.runtime.chunk_retry_count_runtime,
         "chunk_ranges_runtime": [list(rng) for rng in list(job.runtime.chunk_ranges_runtime or [])],
         "chunk_retry_total_failures_runtime": job.runtime.chunk_retry_total_failures_runtime,
+        "retained_usd_path": job.runtime.retained_usd_path,
+        "retained_usd_exists": job.runtime.retained_usd_exists,
+        "retained_usd_reusable": job.runtime.retained_usd_reusable,
+        "retained_usd_verified": job.runtime.retained_usd_verified,
+        "retained_usd_build_start_frame": job.runtime.retained_usd_build_start_frame,
+        "retained_usd_build_end_frame": job.runtime.retained_usd_build_end_frame,
+        "retained_usd_build_step": job.runtime.retained_usd_build_step,
         "allframesatonce_enabled": job.runtime.allframesatonce_enabled,
         "build_pass_completed": job.view.build_pass_completed,
         "strict_frame_range": job.spec.strict_frame_range,
@@ -65,6 +88,8 @@ def job_from_persisted_dict(data: dict[str, Any], *, active_job_id: str | None =
         except Exception:
             status = JobStatus.QUEUED
         raw_id = str(data.get("id", "") or "").strip()
+        persisted_allframes = data.get("render_all_frames_single_process")
+        runtime_allframes = data.get("allframesatonce_enabled")
         marked_active = bool(raw_id and active_job_id and raw_id == str(active_job_id or "").strip())
         if status == JobStatus.RUNNING or marked_active:
             status = JobStatus.INTERRUPTED
@@ -80,6 +105,17 @@ def job_from_persisted_dict(data: dict[str, Any], *, active_job_id: str | None =
             status=status,
             enabled=bool(data.get("enabled", True)),
             frame_handling_mode=FrameHandlingMode.coerce(data.get("frame_handling_mode")),
+            device_override_mode=DeviceOverrideMode.coerce(data.get("device_override_mode")),
+            device_selection=str(data.get("device_selection", "") or ""),
+            render_all_frames_single_process=(
+                bool(persisted_allframes)
+                if persisted_allframes is not None
+                else bool(runtime_allframes) if isinstance(runtime_allframes, bool) else False
+            ),
+            retain_built_usd=bool(data.get("retain_built_usd", False)),
+            reuse_retained_usd=bool(data.get("reuse_retained_usd", False)),
+            usd_output_directory_mode=UsdOutputDirectoryMode.coerce(data.get("usd_output_directory_mode")),
+            usd_output_directory_custom_path=str(data.get("usd_output_directory_custom_path", "") or ""),
         )
         if not job.spec.hip_path or not job.spec.rop_path:
             return None
@@ -107,6 +143,17 @@ def job_from_persisted_dict(data: dict[str, Any], *, active_job_id: str | None =
             if isinstance(r, (list, tuple)) and len(r) == 3
         ]
         job.runtime.chunk_retry_total_failures_runtime = int(data.get("chunk_retry_total_failures_runtime", 0) or 0)
+        job.runtime.retained_usd_path = str(data.get("retained_usd_path", "") or "")
+        job.runtime.retained_usd_exists = bool(data.get("retained_usd_exists", False))
+        job.runtime.retained_usd_reusable = bool(data.get("retained_usd_reusable", False))
+        job.runtime.retained_usd_verified = bool(data.get("retained_usd_verified", False))
+        job.runtime.retained_usd_build_start_frame = _optional_int(data.get("retained_usd_build_start_frame"))
+        job.runtime.retained_usd_build_end_frame = _optional_int(data.get("retained_usd_build_end_frame"))
+        job.runtime.retained_usd_build_step = _optional_int(data.get("retained_usd_build_step"))
+        if not job.runtime.retained_usd_verified:
+            job.runtime.retained_usd_path = ""
+            job.runtime.retained_usd_exists = False
+            job.runtime.retained_usd_reusable = False
         afa = data.get("allframesatonce_enabled")
         job.runtime.allframesatonce_enabled = bool(afa) if isinstance(afa, bool) else None
         job.view.build_pass_completed = bool(data.get("build_pass_completed", False))

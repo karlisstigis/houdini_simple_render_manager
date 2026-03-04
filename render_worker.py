@@ -71,6 +71,7 @@ class RenderWorker(QtCore.QObject):
         hbatch_path = str(payload.get("hbatch_path", "") or "").strip()
         commands = [str(cmd) for cmd in list(payload.get("commands", []) or []) if str(cmd).strip()]
         effective_plan = dict(payload.get("effective_plan", {}) or {})
+        environment = {str(key): str(value) for key, value in dict(payload.get("environment", {}) or {}).items()}
         if not job_id or not hip_path or not hbatch_path or not commands:
             self._emit("render.crashed", request_id, {"job_id": job_id, "reason": "Invalid render payload.", "process_error": "invalid_payload", "last_known_state": {}})
             return
@@ -82,6 +83,11 @@ class RenderWorker(QtCore.QObject):
         self._graceful_stop_requested = False
 
         proc.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.SeparateChannels)
+        if environment:
+            env = QtCore.QProcessEnvironment.systemEnvironment()
+            for key, value in environment.items():
+                env.insert(key, value)
+            proc.setProcessEnvironment(env)
         proc.readyReadStandardOutput.connect(self._on_stdout)
         proc.readyReadStandardError.connect(self._on_stderr)
         proc.errorOccurred.connect(self._on_process_error)

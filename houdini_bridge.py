@@ -9,6 +9,7 @@ from typing import Callable
 
 REQUIRED_HOUDINI_SCRIPT_FILENAMES = [
     "hsrm_render_preflight_template.py",
+    "hsrm_retained_usd_paths.py",
     "hsrm_husk_pre_render.py",
     "hsrm_husk_pre_frame.py",
     "hsrm_husk_post_frame.py",
@@ -65,11 +66,13 @@ def ensure_husk_hook_files(
     scripts_dir: Path,
     hook_script_path_fn: Callable[[str], Path],
 ) -> dict[str, str]:
+    helper = hook_script_path_fn("hsrm_retained_usd_paths")
     pre_render = hook_script_path_fn("hsrm_husk_pre_render")
     pre_frame = hook_script_path_fn("hsrm_husk_pre_frame")
     post_frame = hook_script_path_fn("hsrm_husk_post_frame")
     post_render = hook_script_path_fn("hsrm_husk_post_render")
 
+    helper.write_text(load_houdini_script_text(scripts_dir, "hsrm_retained_usd_paths.py"), encoding="utf-8")
     pre_render.write_text(load_houdini_script_text(scripts_dir, "hsrm_husk_pre_render.py"), encoding="utf-8")
     pre_frame.write_text(load_houdini_script_text(scripts_dir, "hsrm_husk_pre_frame.py"), encoding="utf-8")
     post_frame.write_text(load_houdini_script_text(scripts_dir, "hsrm_husk_post_frame.py"), encoding="utf-8")

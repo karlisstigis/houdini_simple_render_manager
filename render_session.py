@@ -31,6 +31,7 @@ class RenderSessionHooks:
     ensure_husk_hook_files: Callable[[], dict[str, str]]
     build_render_preflight_script: Callable[[RenderJob, bool, dict[str, str]], str]
     current_hbatch_path: Callable[[], str]
+    build_render_environment: Callable[[RenderJob], dict[str, str]]
     normalize_output_display_path: Callable[[str], str]
     hscript_quote: Callable[[str], str]
     current_time: Callable[[], datetime]
@@ -39,6 +40,7 @@ class RenderSessionHooks:
     update_job_phase_from_output: Callable[[RenderJob, str], None]
     cancel_phase_promote: Callable[[], None]
     mark_job_offline: Callable[[RenderJob, str | None], None]
+    sync_retained_usd_file_state: Callable[[RenderJob], None]
 
 
 @dataclass
@@ -122,6 +124,7 @@ class RenderSessionController:
             "job_id": job.id,
             "hip_path": job.spec.hip_path,
             "hbatch_path": self._hooks.current_hbatch_path(),
+            "environment": dict(self._hooks.build_render_environment(job) or {}),
             "commands": commands,
             "effective_plan": {
                 "mode": plan.command_mode,
@@ -201,6 +204,8 @@ class RenderSessionController:
                 pass
 
         self._hooks.update_phase_from_frame_sequence(job, previous_frame_seen)
+        if job.runtime.retained_usd_metadata_pending_write:
+            self._hooks.sync_retained_usd_file_state(job)
 
         total: int | None = None
         range_start: float | None = None
@@ -354,6 +359,8 @@ class RenderSessionController:
             self._hooks.refresh_queue_table(select_job_id=job.id)
             return RenderFinishResult(continue_next_chunk=False, retry_current_chunk=True, delay_ms=delay_sec * 1000, final_status=job.runtime.status)
 
+        if not finish_eval.was_canceled and not finish_eval.was_offline and finish_eval.logical_success:
+            self._hooks.sync_retained_usd_file_state(job)
         self._hooks.close_current_job_log()
         self._hooks.save_queue_state()
         self._hooks.refresh_queue_table(select_job_id=job.id)

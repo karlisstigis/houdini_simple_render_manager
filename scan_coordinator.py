@@ -78,6 +78,7 @@ class ScanCoordinator:
         return RopInfo(
             error=info_payload.get("error"),
             strict_frame_range=info_payload.get("strict_frame_range"),
+            all_frames_single_process=info_payload.get("all_frames_single_process"),
             runtime_start_frame=info_payload.get("runtime_start_frame"),
             runtime_end_frame=info_payload.get("runtime_end_frame"),
             runtime_step=info_payload.get("runtime_step"),
@@ -86,7 +87,7 @@ class ScanCoordinator:
             combined_output=str(info_payload.get("combined_output", "") or ""),
         )
 
-    def probe_and_apply_job_rop_metadata(self, job: RenderJob) -> str | None:
+    def probe_and_apply_job_rop_metadata(self, job: RenderJob, *, apply_single_process_setting: bool = False) -> str | None:
         try:
             info = self.probe_rop_info(job.spec.hip_path, job.spec.rop_path)
             if info is not None:
@@ -95,6 +96,7 @@ class ScanCoordinator:
                     info,
                     self._hooks.normalize_output_display_path,
                     apply_runtime_range=True,
+                    apply_single_process_setting=apply_single_process_setting,
                 )
             if info is None:
                 return None

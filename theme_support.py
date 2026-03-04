@@ -267,11 +267,45 @@ def build_app_stylesheet(theme: dict[str, str], icons: dict[str, str]) -> str:
             border: 1px solid {panel_border};
             border-radius: 6px;
         }}
+        QFrame#jobPropertiesFrame {{
+            background-color: {t['panel_bg']};
+            border-top: none;
+            border-right: none;
+            border-bottom: none;
+            border-left: 1px solid {panel_border};
+            border-radius: 0px;
+        }}
         QWidget#panelFrameHeader {{
             background-color: {panel_header_bg};
             border-top-left-radius: 6px;
             border-top-right-radius: 6px;
             border-bottom: 1px solid {panel_border};
+        }}
+        QFrame#jobPropertiesFrame QWidget#panelFrameHeader {{
+            border-top-left-radius: 0px;
+            border-top-right-radius: 0px;
+        }}
+        QWidget#collapsibleSection {{
+            background: transparent;
+            border: none;
+        }}
+        QWidget#collapsibleSection > QWidget {{
+            background: transparent;
+            border: none;
+        }}
+        QToolButton#collapsibleSectionHeader {{
+            background-color: {panel_header_bg};
+            color: {t['text']};
+            border: none;
+            border-bottom: 1px solid {panel_border};
+            padding: 8px 12px;
+            text-align: left;
+        }}
+        QToolButton#collapsibleSectionHeader:hover {{
+            background-color: {QtGui.QColor(panel_header_bg).lighter(108).name()};
+        }}
+        QToolButton#collapsibleSectionHeader:checked {{
+            background-color: {panel_header_bg};
         }}
         QLabel#panelFrameTitle {{
             background-color: transparent;
@@ -522,6 +556,15 @@ def build_app_stylesheet(theme: dict[str, str], icons: dict[str, str]) -> str:
             max-width: 1px;
             margin-top: 2px;
             margin-bottom: 2px;
+        }}
+        QFrame#jobPropertiesSeparator {{
+            background-color: {panel_border};
+            border: none;
+            min-height: 1px;
+            max-height: 1px;
+        }}
+        QLineEdit#jobPropertiesReadOnlyField {{
+            color: #9a9a9a;
         }}
         QWidget#ropPanelHeader {{
             background-color: {panel_header_bg};
