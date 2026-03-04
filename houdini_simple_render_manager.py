@@ -146,6 +146,12 @@ from retained_usd_runtime import (
     sync_retained_usd_file_state as sync_retained_usd_file_state_model,
     write_retained_usd_metadata as write_retained_usd_metadata_model,
 )
+from retained_usd_panel_state import (
+    can_delete_retained_usd as can_delete_retained_usd_model,
+    multi_job_retained_usd_panel_state as multi_job_retained_usd_panel_state_model,
+    retained_usd_panel_default_fields as retained_usd_panel_default_fields_model,
+    single_job_retained_usd_panel_state as single_job_retained_usd_panel_state_model,
+)
 from notification_rules import (
     classified_render_error_notification as classified_render_error_notification_model,
     notification_messages_for_log as notification_messages_for_log_model,
@@ -2420,49 +2426,23 @@ class MainWindow(QtWidgets.QMainWindow):
             "mixed_usd_output_mode": False,
             "usd_output_directory_mode": default_usd_output_mode.value,
             "usd_output_directory_custom_path": self._default_usd_output_directory_custom_path(),
-            "retained_usd_path": "",
-            "retained_usd_built_range": "-",
-            "retained_usd_built_step": "-",
-            "retained_usd_built_at": "-",
-            "retained_usd_status": "-",
-            "retained_usd_warning": "",
-            "can_open": False,
-            "can_delete": False,
+            **retained_usd_panel_default_fields_model(),
         }
 
     def _single_job_retained_usd_panel_state(self, job: RenderJob) -> dict[str, Any]:
-        self._sync_retained_usd_file_state(job)
-        retained_file_path = str(job.runtime.retained_usd_path or "").strip()
-        metadata = None
-        retained_path_text = ""
-        retained_built_range_text = "-"
-        retained_built_step_text = "-"
-        retained_built_at_text = "-"
-        can_open = False
-
-        if retained_file_path:
-            retained_path = Path(retained_file_path)
-            retained_path_text = str(retained_path.parent)
-            metadata = self._load_retained_usd_metadata(retained_path)
-            retained_built_range_text, retained_built_step_text = self._retained_usd_build_info(metadata)
-            retained_built_at_text = self._retained_usd_built_at_text(metadata)
-            can_open = bool(job.runtime.retained_usd_exists and self._is_absolute_retained_usd_path(retained_file_path))
-        elif bool(job.spec.retain_built_usd):
-            retained_path_text = self._configured_retained_usd_folder_preview(job)
-
-        retained_warning = self._retained_usd_hip_stale_reason(job, metadata) if metadata else self._retained_usd_stale_reason(job)
-        if not retained_warning:
-            retained_warning = self._retained_usd_invalid_reason(job)
-
-        return {
-            "retained_usd_path": retained_path_text,
-            "retained_usd_built_range": retained_built_range_text,
-            "retained_usd_built_step": retained_built_step_text,
-            "retained_usd_built_at": retained_built_at_text,
-            "retained_usd_status": self._retained_usd_status_text(job, metadata),
-            "retained_usd_warning": retained_warning,
-            "can_open": can_open,
-        }
+        return single_job_retained_usd_panel_state_model(
+            job,
+            sync_file_state=self._sync_retained_usd_file_state,
+            load_metadata=self._load_retained_usd_metadata,
+            build_info_text=self._retained_usd_build_info,
+            built_at_text=self._retained_usd_built_at_text,
+            is_absolute_path=self._is_absolute_retained_usd_path,
+            configured_folder_preview=self._configured_retained_usd_folder_preview,
+            hip_stale_reason=self._retained_usd_hip_stale_reason,
+            stale_reason=self._retained_usd_stale_reason,
+            invalid_reason=self._retained_usd_invalid_reason,
+            status_text=self._retained_usd_status_text,
+        )
 
     def _sync_retained_usd_file_state(self, job: RenderJob) -> None:
         sync_retained_usd_file_state_model(
@@ -2639,15 +2619,7 @@ class MainWindow(QtWidgets.QMainWindow):
             retained_usd_state = self._single_job_retained_usd_panel_state(selected_jobs[0])
         else:
             retained_paths = self._selected_retained_usd_paths()
-            retained_usd_state = {
-                "retained_usd_path": f"{len({str(path.parent) for path in retained_paths})} USD folder(s)" if retained_paths else "",
-                "retained_usd_built_range": "-",
-                "retained_usd_built_step": "-",
-                "retained_usd_built_at": "-",
-                "retained_usd_status": f"{len(retained_paths)} file(s) available" if retained_paths else "No retained USD files",
-                "retained_usd_warning": "",
-                "can_open": False,
-            }
+            retained_usd_state = multi_job_retained_usd_panel_state_model(retained_paths)
 
         editable = all(
             can_edit_job(job, is_active_job=self._is_active_job(job), is_locked=self._is_job_path_sync_locked(job)).allowed
@@ -2655,9 +2627,12 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         current_device_mode = DeviceOverrideMode.coerce(first_device_mode)
         show_custom_devices = current_device_mode is DeviceOverrideMode.SPECIFIC_GPUS and not mixed_device_mode
-        can_delete = bool(retained_usd_state["can_open"]) if selected_count == 1 else bool(retained_paths)
-        if can_delete:
-            can_delete = not any(self._is_active_job(job) or self._is_job_path_sync_locked(job) for job in selected_jobs)
+        can_delete = can_delete_retained_usd_model(
+            selected_count=selected_count,
+            retained_state_can_open=bool(retained_usd_state["can_open"]),
+            retained_paths_present=bool(retained_paths),
+            has_active_or_locked_job=any(self._is_active_job(job) or self._is_job_path_sync_locked(job) for job in selected_jobs),
+        )
 
         panel.set_state(
             {
