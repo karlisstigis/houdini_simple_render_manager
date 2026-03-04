@@ -152,6 +152,11 @@ from retained_usd_panel_state import (
     retained_usd_panel_default_fields as retained_usd_panel_default_fields_model,
     single_job_retained_usd_panel_state as single_job_retained_usd_panel_state_model,
 )
+from retained_usd_actions import (
+    clear_deleted_retained_usd_runtime as clear_deleted_retained_usd_runtime_model,
+    delete_retained_usd_directories as delete_retained_usd_directories_model,
+    first_retained_usd_folder as first_retained_usd_folder_model,
+)
 from notification_rules import (
     classified_render_error_notification as classified_render_error_notification_model,
     notification_messages_for_log as notification_messages_for_log_model,
@@ -2759,8 +2764,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if not paths:
             safe_message(self, "Retained USD", "No retained USD file is available for the current selection.")
             return
-        target = paths[0]
-        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(target.parent)))
+        target_folder = first_retained_usd_folder_model(paths)
+        if target_folder is None:
+            safe_message(self, "Retained USD", "No retained USD file is available for the current selection.")
+            return
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(target_folder)))
 
     def _delete_selected_retained_usd(self) -> None:
         selected_jobs = self._selected_jobs()
@@ -2771,30 +2779,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if any(self._is_active_job(job) or self._is_job_path_sync_locked(job) for job in selected_jobs):
             safe_message(self, "Retained USD", "Wait for the current job or path update to finish.")
             return
-        deleted_any = False
-        target_dirs = {path.resolve().parent for path in paths}
-        for folder in target_dirs:
-            try:
-                import shutil
-                shutil.rmtree(folder, ignore_errors=False)
-                deleted_any = True
-            except OSError as exc:
-                safe_message(self, "Retained USD", f"Failed to delete retained USD folder:\n{folder}", str(exc))
-                return
-        if not deleted_any:
+        delete_result = delete_retained_usd_directories_model(paths)
+        if delete_result.error is not None and delete_result.error_dir is not None:
+            safe_message(
+                self,
+                "Retained USD",
+                f"Failed to delete retained USD folder:\n{delete_result.error_dir}",
+                str(delete_result.error),
+            )
             return
+        if not delete_result.deleted_any:
+            return
+        target_dirs = set(delete_result.target_dirs)
         target_ids = [job.id for job in selected_jobs]
         before_states = self._job_states_for_ids(target_ids)
-        for job in selected_jobs:
-            retained_path = str(job.runtime.retained_usd_path or "").strip()
-            if not retained_path:
-                continue
-            try:
-                resolved_dir = Path(retained_path).resolve().parent
-            except (OSError, RuntimeError):
-                resolved_dir = Path(retained_path).parent
-            if resolved_dir in target_dirs:
-                self._clear_retained_usd_runtime(job)
+        clear_deleted_retained_usd_runtime_model(
+            selected_jobs,
+            target_dirs,
+            clear_runtime=self._clear_retained_usd_runtime,
+        )
         after_states = self._job_states_for_ids(target_ids)
         self._push_history_command(
             {
