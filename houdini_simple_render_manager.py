@@ -129,6 +129,14 @@ from rop_metadata import (
     RopInfo,
     apply_rop_info_to_job as apply_rop_info_to_job_model,
 )
+from retained_usd_policy import (
+    retained_usd_build_info as retained_usd_build_info_model,
+    retained_usd_built_at_text as retained_usd_built_at_text_model,
+    retained_usd_hip_stale_reason as retained_usd_hip_stale_reason_model,
+    retained_usd_invalid_reason as retained_usd_invalid_reason_model,
+    retained_usd_metadata_path as retained_usd_metadata_path_model,
+    retained_usd_status_text as retained_usd_status_text_model,
+)
 from notification_rules import (
     classified_render_error_notification as classified_render_error_notification_model,
     notification_messages_for_log as notification_messages_for_log_model,
@@ -2496,7 +2504,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _retained_usd_metadata_path(self, retained_usd_path: Path) -> Path:
-        return retained_usd_path.with_name(f"{retained_usd_path.name}.hsrm.json")
+        return retained_usd_metadata_path_model(retained_usd_path)
 
     def _current_retained_usd_build_range(self, job: RenderJob) -> tuple[int, int, int] | None:
         resolved = self._resolve_job_range_for_execution(job, mutate_job=False)
@@ -2565,97 +2573,38 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _retained_usd_build_info(metadata: dict[str, Any] | None) -> tuple[str, str]:
-        if not isinstance(metadata, dict):
-            return "-", "-"
-        start = metadata.get("start_frame")
-        end = metadata.get("end_frame")
-        step = metadata.get("step")
-        if start is None or end is None:
-            range_text = "-"
-        else:
-            range_text = f"{int(start)}-{int(end)}"
-        if step is None:
-            step_text = "-"
-        else:
-            step_text = str(int(step))
-        return range_text, step_text
+        return retained_usd_build_info_model(metadata)
 
     @staticmethod
     def _retained_usd_built_at_text(metadata: dict[str, Any] | None) -> str:
-        if not isinstance(metadata, dict):
-            return "-"
-        raw = str(metadata.get("built_at", "") or "").strip()
-        if not raw:
-            return "-"
-        try:
-            return datetime.fromisoformat(raw).strftime("%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return raw
+        return retained_usd_built_at_text_model(metadata)
 
     def _retained_usd_hip_stale_reason(self, job: RenderJob, metadata: dict[str, Any] | None) -> str:
-        if not isinstance(metadata, dict):
-            return ""
-        hip_path = str(job.spec.hip_path or "").strip()
-        if not hip_path:
-            return ""
-        built_hip_mtime = metadata.get("hip_mtime")
-        if built_hip_mtime is None:
-            return ""
-        try:
-            current_hip_mtime = Path(hip_path).stat().st_mtime
-        except OSError:
-            return ""
-        try:
-            built_hip_mtime_value = float(built_hip_mtime)
-        except (TypeError, ValueError):
-            return ""
-        if current_hip_mtime > built_hip_mtime_value:
-            return "Potentially stale: HIP was saved after this USD was built."
-        return ""
+        return retained_usd_hip_stale_reason_model(str(job.spec.hip_path or ""), metadata)
 
     def _retained_usd_status_text(self, job: RenderJob, metadata: dict[str, Any] | None) -> str:
-        if not self._single_process_render_enabled_for_job(job) and (bool(job.spec.retain_built_usd) or bool(job.spec.reuse_retained_usd)):
-            return "Requires single-process render"
-        if not bool(job.spec.retain_built_usd):
-            return "Build on next render"
-        retained_path = str(job.runtime.retained_usd_path or "").strip()
-        if not retained_path or not bool(job.runtime.retained_usd_exists):
-            return "Build on next render"
-        if not bool(job.spec.reuse_retained_usd):
-            return "Build on next render"
-        if not isinstance(metadata, dict):
-            return "Build on next render"
-        if self._retained_usd_invalid_reason(job):
-            return "Build on next render"
-        return "Reuse on next render"
+        return retained_usd_status_text_model(
+            single_process_render_enabled=self._single_process_render_enabled_for_job(job),
+            retain_built_usd=bool(job.spec.retain_built_usd),
+            reuse_retained_usd=bool(job.spec.reuse_retained_usd),
+            retained_path=str(job.runtime.retained_usd_path or "").strip(),
+            retained_usd_exists=bool(job.runtime.retained_usd_exists),
+            metadata=metadata,
+            invalid_reason=self._retained_usd_invalid_reason(job),
+        )
 
     def _retained_usd_invalid_reason(self, job: RenderJob) -> str:
-        if not self._single_process_render_enabled_for_job(job):
-            if bool(job.spec.retain_built_usd) or bool(job.spec.reuse_retained_usd):
-                return "Cannot retain or reuse USD: enable Render All Frames with a Single Process."
-            return ""
         retained_path = str(job.runtime.retained_usd_path or "").strip()
-        if not retained_path:
-            return ""
-        metadata = self._load_retained_usd_metadata(Path(retained_path))
-        if not metadata:
-            return "Cannot reuse USD: build metadata is unavailable."
+        metadata = self._load_retained_usd_metadata(Path(retained_path)) if retained_path else None
         current_range = self._current_retained_usd_reuse_range(job)
-        if current_range is None:
-            return ""
-        current_start, current_end, current_step = current_range
-        built_start = int(metadata.get("start_frame", current_start))
-        built_end = int(metadata.get("end_frame", current_end))
-        built_step = int(metadata.get("step", current_step))
-        if current_start < built_start or current_end > built_end:
-            return "Cannot reuse USD: current frame range exceeds the built USD range."
-        if built_step != 1:
-            if current_step == built_step:
-                if ((current_start - built_start) % built_step) == 0:
-                    return ""
-                return "Cannot reuse USD: current frame range is not aligned with the built USD step."
-            return "Cannot reuse USD: retained USD must be built with step 1 to reuse with a different step."
-        return ""
+        return retained_usd_invalid_reason_model(
+            single_process_render_enabled=self._single_process_render_enabled_for_job(job),
+            retain_built_usd=bool(job.spec.retain_built_usd),
+            reuse_retained_usd=bool(job.spec.reuse_retained_usd),
+            retained_path=retained_path,
+            metadata=metadata,
+            current_range=current_range,
+        )
 
     def _delete_retained_usd_folder_for_job(self, job: RenderJob) -> bool:
         retained_path = str(job.runtime.retained_usd_path or "").strip()
