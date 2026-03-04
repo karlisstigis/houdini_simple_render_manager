@@ -28,6 +28,8 @@ class QueueTableModelTests(unittest.TestCase):
                 jobs_provider=lambda: jobs,
                 is_active_job=lambda job: job.runtime.status == JobStatus.RUNNING,
                 job_phase_display=lambda job: job.view.phase_text,
+                job_usd_status_display=lambda job: "Build",
+                job_usd_status_tooltip=lambda job: "USD tooltip",
                 job_time_remaining_display=lambda job: "remain",
                 job_frame_display=lambda job: "frame",
                 job_started_time_display=lambda job: "started",
@@ -50,11 +52,14 @@ class QueueTableModelTests(unittest.TestCase):
         job.view.percent_text = "42%"
         model = self._build_model([job])
         self.assertEqual(model.rowCount(), 1)
-        self.assertEqual(model.columnCount(), 17)
+        self.assertEqual(model.columnCount(), 18)
         self.assertEqual(model.headerData(0, QtCore.Qt.Orientation.Horizontal), "Name")
+        self.assertEqual(model.headerData(9, QtCore.Qt.Orientation.Horizontal), "USD")
         self.assertEqual(model.data(model.index(0, 0), QtCore.Qt.ItemDataRole.DisplayRole), "Shot A")
         self.assertEqual(model.data(model.index(0, 1), QtCore.Qt.ItemDataRole.DisplayRole), "E:/a.hip")
         self.assertEqual(model.data(model.index(0, 7), QtCore.Qt.ItemDataRole.DisplayRole), "42%")
+        self.assertEqual(model.data(model.index(0, QueueTableModel.USD_COLUMN), QtCore.Qt.ItemDataRole.DisplayRole), "Build")
+        self.assertEqual(model.data(model.index(0, QueueTableModel.USD_COLUMN), QtCore.Qt.ItemDataRole.ToolTipRole), "USD tooltip")
 
     def test_roles_and_flags(self) -> None:
         job = RenderJob("E:/a.hip", "/out/karma1", "use_rop", status=JobStatus.RUNNING)
