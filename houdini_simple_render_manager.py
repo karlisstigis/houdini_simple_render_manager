@@ -137,6 +137,15 @@ from retained_usd_policy import (
     retained_usd_metadata_path as retained_usd_metadata_path_model,
     retained_usd_status_text as retained_usd_status_text_model,
 )
+from retained_usd_runtime import (
+    clear_retained_usd_runtime as clear_retained_usd_runtime_model,
+    delete_retained_usd_folder_for_job as delete_retained_usd_folder_for_job_model,
+    is_absolute_retained_usd_path as is_absolute_retained_usd_path_model,
+    selected_retained_usd_paths as selected_retained_usd_paths_model,
+    should_write_retained_usd_metadata_now as should_write_retained_usd_metadata_now_model,
+    sync_retained_usd_file_state as sync_retained_usd_file_state_model,
+    write_retained_usd_metadata as write_retained_usd_metadata_model,
+)
 from notification_rules import (
     classified_render_error_notification as classified_render_error_notification_model,
     notification_messages_for_log as notification_messages_for_log_model,
@@ -2379,33 +2388,18 @@ class MainWindow(QtWidgets.QMainWindow):
         return option_states
 
     def _selected_retained_usd_paths(self) -> list[Path]:
-        paths: list[Path] = []
-        for job in self._selected_jobs():
-            retained_path = str(job.runtime.retained_usd_path or "").strip()
-            if not self._is_absolute_retained_usd_path(retained_path):
-                continue
-            path = Path(retained_path)
-            if path.exists():
-                paths.append(path)
-        return paths
+        return selected_retained_usd_paths_model(
+            self._selected_jobs(),
+            is_absolute_path=self._is_absolute_retained_usd_path,
+        )
 
     @staticmethod
     def _is_absolute_retained_usd_path(path_text: str) -> bool:
-        try:
-            return bool(path_text) and Path(path_text).is_absolute()
-        except (TypeError, ValueError, OSError):
-            return False
+        return is_absolute_retained_usd_path_model(path_text)
 
     @staticmethod
     def _clear_retained_usd_runtime(job: RenderJob) -> None:
-        job.runtime.retained_usd_path = ""
-        job.runtime.retained_usd_exists = False
-        job.runtime.retained_usd_reusable = False
-        job.runtime.retained_usd_verified = False
-        job.runtime.retained_usd_build_start_frame = None
-        job.runtime.retained_usd_build_end_frame = None
-        job.runtime.retained_usd_build_step = None
-        job.runtime.retained_usd_metadata_pending_write = False
+        clear_retained_usd_runtime_model(job)
 
     def _job_properties_panel_default_state(self) -> dict[str, Any]:
         check_state_value = lambda state: int(getattr(state, "value", state))
@@ -2471,37 +2465,16 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
     def _sync_retained_usd_file_state(self, job: RenderJob) -> None:
-        if not bool(job.runtime.retained_usd_verified):
-            job.runtime.retained_usd_path = ""
-            job.runtime.retained_usd_exists = False
-            job.runtime.retained_usd_reusable = False
-            return
-        retained_path = str(job.runtime.retained_usd_path or "").strip()
-        if not retained_path:
-            job.runtime.retained_usd_exists = False
-            job.runtime.retained_usd_reusable = False
-            return
-        path = Path(retained_path)
-        exists = path.exists()
-        job.runtime.retained_usd_exists = exists
-        if (
-            exists
-            and bool(job.runtime.retained_usd_metadata_pending_write)
-            and self._should_write_retained_usd_metadata_now(job)
-        ):
-            self._write_retained_usd_metadata(job, path)
-            job.runtime.retained_usd_metadata_pending_write = False
-        job.runtime.retained_usd_reusable = bool(exists and not self._retained_usd_invalid_reason(job))
+        sync_retained_usd_file_state_model(
+            job,
+            invalid_reason_for_job=self._retained_usd_invalid_reason,
+            should_write_metadata_now=self._should_write_retained_usd_metadata_now,
+            write_metadata=self._write_retained_usd_metadata,
+        )
 
     @staticmethod
     def _should_write_retained_usd_metadata_now(job: RenderJob) -> bool:
-        if job.runtime.status == JobStatus.DONE:
-            return True
-        return bool(
-            job.runtime.status == JobStatus.RUNNING
-            and job.view.build_pass_completed
-            and job.view.phase_text == "Render"
-        )
+        return should_write_retained_usd_metadata_now_model(job)
 
     def _retained_usd_metadata_path(self, retained_usd_path: Path) -> Path:
         return retained_usd_metadata_path_model(retained_usd_path)
@@ -2543,33 +2516,13 @@ class MainWindow(QtWidgets.QMainWindow):
         return data
 
     def _write_retained_usd_metadata(self, job: RenderJob, retained_usd_path: Path) -> None:
-        if (
-            job.runtime.retained_usd_build_start_frame is None
-            or job.runtime.retained_usd_build_end_frame is None
-            or (job.runtime.retained_usd_build_step or 0) <= 0
-        ):
-            return
-        start = int(job.runtime.retained_usd_build_start_frame)
-        end = int(job.runtime.retained_usd_build_end_frame)
-        step = int(job.runtime.retained_usd_build_step)
-        try:
-            hip_mtime = Path(job.spec.hip_path).stat().st_mtime if str(job.spec.hip_path or "").strip() else None
-        except OSError:
-            hip_mtime = None
-        payload = {
-            "version": 1,
-            "hip_path": str(job.spec.hip_path or ""),
-            "hip_mtime": hip_mtime,
-            "rop_path": str(job.spec.rop_path or ""),
-            "start_frame": int(start),
-            "end_frame": int(end),
-            "step": int(step),
-            "built_at": datetime.now().isoformat(timespec="seconds"),
-        }
-        try:
-            write_json_atomic(self._retained_usd_metadata_path(retained_usd_path), payload)
-        except (OSError, TypeError, ValueError) as exc:
-            self._append_log("Stderr", f"[RetainUSD] Failed to write metadata sidecar: {exc}\n")
+        write_retained_usd_metadata_model(
+            job,
+            retained_usd_path,
+            metadata_path_for=self._retained_usd_metadata_path,
+            append_log=self._append_log,
+            now_fn=datetime.now,
+        )
 
     @staticmethod
     def _retained_usd_build_info(metadata: dict[str, Any] | None) -> tuple[str, str]:
@@ -2607,29 +2560,12 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _delete_retained_usd_folder_for_job(self, job: RenderJob) -> bool:
-        retained_path = str(job.runtime.retained_usd_path or "").strip()
-        if not retained_path:
-            return False
-        if not self._is_absolute_retained_usd_path(retained_path):
-            self._append_log("Stderr", f"[RetainUSD] Ignoring non-absolute retained USD path: {retained_path}\n")
-            self._clear_retained_usd_runtime(job)
-            return False
-        try:
-            folder = Path(retained_path).resolve().parent
-        except (OSError, RuntimeError):
-            folder = Path(retained_path).parent
-        if not folder.exists():
-            self._clear_retained_usd_runtime(job)
-            return False
-        try:
-            import shutil
-            shutil.rmtree(folder, ignore_errors=False)
-        except OSError as exc:
-            self._append_log("Stderr", f"[RetainUSD] Failed to delete previous USD folder before rebuild: {folder} ({exc})\n")
-            return False
-        self._clear_retained_usd_runtime(job)
-        self._append_log("Stdout", f"[RetainUSD] Deleted previous USD folder before rebuild: {folder}\n")
-        return True
+        return delete_retained_usd_folder_for_job_model(
+            job,
+            is_absolute_path=self._is_absolute_retained_usd_path,
+            clear_runtime=self._clear_retained_usd_runtime,
+            append_log=self._append_log,
+        )
 
     def _retained_usd_stale_reason(self, job: RenderJob) -> str:
         self._sync_retained_usd_file_state(job)
