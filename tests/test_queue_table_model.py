@@ -8,6 +8,8 @@ from queue_models import JobStatus, RenderJob
 from queue_table_model import (
     DISPLAY_STATUS_ROLE,
     EDITABLE_ROLE,
+    OVERRIDE_RANGE_ROLE,
+    OVERRIDE_STEP_ROLE,
     PROGRESS_BUILD_ROLE,
     PROGRESS_RENDER_ROLE,
     QueueTableModel,
@@ -78,6 +80,42 @@ class QueueTableModelTests(unittest.TestCase):
         result = model.setData(model.index(0, 0), "New Name")
         self.assertTrue(result)
         self.assertEqual(calls, [(0, 0, "New Name")])
+
+    def test_override_flags_use_cached_rop_defaults_when_runtime_range_is_unset(self) -> None:
+        job = RenderJob("E:/a.hip", "/out/karma1", "override", start_frame=105, end_frame=110, step=2)
+        job.runtime.rop_default_start_frame = 100
+        job.runtime.rop_default_end_frame = 110
+        job.runtime.rop_default_step = 1
+        job.runtime.runtime_start_frame = None
+        job.runtime.runtime_end_frame = None
+        job.runtime.runtime_step = None
+        model = self._build_model([job])
+        self.assertTrue(bool(model.data(model.index(0, QueueTableModel.FRAME_RANGE_COLUMN), OVERRIDE_RANGE_ROLE)))
+        self.assertTrue(bool(model.data(model.index(0, QueueTableModel.STEP_COLUMN), OVERRIDE_STEP_ROLE)))
+
+    def test_override_flags_clear_when_override_matches_cached_rop_defaults(self) -> None:
+        job = RenderJob("E:/a.hip", "/out/karma1", "override", start_frame=100, end_frame=110, step=1)
+        job.runtime.rop_default_start_frame = 100
+        job.runtime.rop_default_end_frame = 110
+        job.runtime.rop_default_step = 1
+        job.runtime.runtime_start_frame = 1
+        job.runtime.runtime_end_frame = 2
+        job.runtime.runtime_step = 3
+        model = self._build_model([job])
+        self.assertFalse(bool(model.data(model.index(0, QueueTableModel.FRAME_RANGE_COLUMN), OVERRIDE_RANGE_ROLE)))
+        self.assertFalse(bool(model.data(model.index(0, QueueTableModel.STEP_COLUMN), OVERRIDE_STEP_ROLE)))
+
+    def test_override_flags_do_not_fall_back_to_runtime_values(self) -> None:
+        job = RenderJob("E:/a.hip", "/out/karma1", "override", start_frame=100, end_frame=110, step=1)
+        job.runtime.runtime_start_frame = 100
+        job.runtime.runtime_end_frame = 110
+        job.runtime.runtime_step = 1
+        job.runtime.rop_default_start_frame = None
+        job.runtime.rop_default_end_frame = None
+        job.runtime.rop_default_step = None
+        model = self._build_model([job])
+        self.assertTrue(bool(model.data(model.index(0, QueueTableModel.FRAME_RANGE_COLUMN), OVERRIDE_RANGE_ROLE)))
+        self.assertTrue(bool(model.data(model.index(0, QueueTableModel.STEP_COLUMN), OVERRIDE_STEP_ROLE)))
 
 
 if __name__ == "__main__":

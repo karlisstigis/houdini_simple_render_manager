@@ -115,7 +115,7 @@ from rop_metadata import (
     apply_rop_info_to_job as apply_rop_info_to_job_model,
 )
 from theme_support import DEFAULT_THEME, build_app_stylesheet, ensure_theme_icons, normalize_theme_colors
-from widgets import AddJobPanel, CleanStepSpinBox, JobPropertiesPanel, PanelFrame, PreferencesDialog, QueueTableItemDelegate, QueueTableWidget
+from widgets import AddJobPanel, CleanStepSpinBox, JobPropertiesPanel, PanelFrame, PreferencesDialog, QueueTableItemDelegate, QueueTableWidget, RopListWidget
 from worker_client import RenderWorkerClient, ScanWorkerClient
 
 
@@ -147,6 +147,7 @@ class ConfigStore:
             "last_hip_dir": "",
             "recent_hip_paths": [],
             "recent_rop_paths": [],
+            "experimental_chunking_enabled": False,
             "default_chunking_enabled": False,
             "default_chunk_size": 10,
             "default_retry_count": 1,
@@ -947,7 +948,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._left_notifications_height_pref = int(max(0, sizes[1]))
 
     def _chunking_enabled(self) -> bool:
-        return bool(getattr(self, "chk_enable_chunking", None) and self.chk_enable_chunking.isChecked())
+        return self._experimental_chunking_enabled() and bool(getattr(self, "chk_enable_chunking", None) and self.chk_enable_chunking.isChecked())
 
     def _chunk_size_value(self) -> int:
         try:
@@ -969,6 +970,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _default_chunking_enabled(self) -> bool:
         return bool(self.config.get("default_chunking_enabled", False))
+
+    def _experimental_chunking_enabled(self) -> bool:
+        return bool(self.config.get("experimental_chunking_enabled", False))
 
     def _default_chunk_size(self) -> int:
         try:
@@ -1315,17 +1319,8 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        controls_row = QtWidgets.QHBoxLayout()
-        controls_row.setContentsMargins(8, 8, 8, 8)
-        controls_row.setSpacing(8)
-        controls_row.addWidget(QtWidgets.QLabel("Recent events"))
-        controls_row.addStretch(1)
-        self.btn_clear_notifications = QtWidgets.QPushButton("Clear")
-        self.btn_clear_notifications.clicked.connect(self._clear_notifications_view_only)
-        controls_row.addWidget(self.btn_clear_notifications)
-        layout.addLayout(controls_row)
-
-        self.notifications_list = QtWidgets.QListWidget()
+        self.notifications_list = RopListWidget()
+        self.notifications_list.setObjectName("notificationsList")
         self.notifications_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.notifications_list.setAlternatingRowColors(True)
         self.notifications_list.setUniformItemSizes(False)
@@ -1334,6 +1329,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.notifications_list.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.notifications_list.verticalScrollBar().setSingleStep(20)
         layout.addWidget(self.notifications_list, 1)
+
+        footer_row = QtWidgets.QHBoxLayout()
+        footer_row.setContentsMargins(8, 8, 8, 8)
+        footer_row.setSpacing(8)
+        self.btn_clear_notifications = QtWidgets.QPushButton("Clear")
+        self.btn_clear_notifications.clicked.connect(self._clear_notifications_view_only)
+        footer_row.addWidget(self.btn_clear_notifications)
+        footer_row.addStretch(1)
+        layout.addLayout(footer_row)
 
         box.setObjectName("panelEmbeddedGroup")
         box.setTitle("")
@@ -1696,6 +1700,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "retry_delay": self._default_retry_delay(),
             },
             {
+                "chunking": self._experimental_chunking_enabled(),
+            },
+            {
                 "mode": self._default_device_mode().value,
                 "selection": self._default_device_selection(),
                 "retain_built_usd": self._default_retain_built_usd(),
@@ -1718,6 +1725,7 @@ class MainWindow(QtWidgets.QMainWindow):
         player_path = str(payload.get("player_path", "")).strip()
         theme = payload.get("theme", {})
         runtime_defaults = payload.get("runtime_defaults", {})
+        experimental_flags = payload.get("experimental_flags", {})
         device_defaults = payload.get("device_defaults", {})
         self._hbatch_path = hbatch_path
         self._save_hbatch_path()
@@ -1726,6 +1734,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.theme = normalize_theme_colors(theme)
             self.config.save_theme(self.theme)
             self._apply_theme()
+        if isinstance(experimental_flags, dict):
+            self.config.set("experimental_chunking_enabled", bool(experimental_flags.get("chunking", False)))
         if isinstance(runtime_defaults, dict):
             try:
                 chunking_enabled = bool(runtime_defaults.get("chunking_enabled", False))
@@ -1742,7 +1752,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.config.set("default_retry_count", retry_count)
             self.config.set("default_retry_delay", retry_delay)
             if hasattr(self, "chk_enable_chunking"):
-                self.chk_enable_chunking.setChecked(chunking_enabled)
+                self.chk_enable_chunking.setChecked(chunking_enabled if self._experimental_chunking_enabled() else False)
             if hasattr(self, "spin_chunk_size"):
                 self.spin_chunk_size.setValue(chunk_size)
             if hasattr(self, "spin_auto_retry"):
@@ -1907,6 +1917,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     job.runtime.runtime_start_frame = rs
                     job.runtime.runtime_end_frame = re_
                     job.runtime.runtime_step = rstep
+                    job.runtime.rop_default_start_frame = rs
+                    job.runtime.rop_default_end_frame = re_
+                    job.runtime.rop_default_step = rstep
 
             if job.spec.frame_range_mode == "use_rop":
                 if job.runtime.runtime_start_frame is None or job.runtime.runtime_end_frame is None:
@@ -3334,26 +3347,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _job_can_reset_cached_cell(job: RenderJob, col: int) -> bool:
+        cached_start = job.runtime.rop_default_start_frame
+        cached_end = job.runtime.rop_default_end_frame
+        cached_step = job.runtime.rop_default_step
         if job.runtime.status == JobStatus.RUNNING:
             return False
         if col == 3:
             return (
-                job.runtime.runtime_start_frame is not None
-                and job.runtime.runtime_end_frame is not None
+                cached_start is not None
+                and cached_end is not None
                 and not job.spec.strict_frame_range
             )
         if col == 4:
-            return (job.runtime.runtime_step not in (None, 0)) and (not job.spec.strict_frame_range)
+            return (cached_step not in (None, 0)) and (not job.spec.strict_frame_range)
         return False
 
     @staticmethod
     def _normalize_job_override_mode_against_cached(job: RenderJob) -> None:
         if job.spec.frame_range_mode != "override":
             return
+        cached_start = job.runtime.rop_default_start_frame
+        cached_end = job.runtime.rop_default_end_frame
+        cached_step = job.runtime.rop_default_step
         if (
-            job.runtime.runtime_start_frame is None
-            or job.runtime.runtime_end_frame is None
-            or job.runtime.runtime_step in (None, 0)
+            cached_start is None
+            or cached_end is None
+            or cached_step in (None, 0)
             or job.spec.start_frame is None
             or job.spec.end_frame is None
             or job.spec.step is None
@@ -3361,10 +3380,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         try:
             matches_range = (
-                int(job.spec.start_frame) == int(float(job.runtime.runtime_start_frame))
-                and int(job.spec.end_frame) == int(float(job.runtime.runtime_end_frame))
+                int(job.spec.start_frame) == int(float(cached_start))
+                and int(job.spec.end_frame) == int(float(cached_end))
             )
-            matches_step = int(job.spec.step) == int(float(job.runtime.runtime_step))
+            matches_step = int(job.spec.step) == int(float(cached_step))
         except Exception:
             return
         if matches_range and matches_step:
@@ -3386,10 +3405,13 @@ class MainWindow(QtWidgets.QMainWindow):
         for target in target_jobs:
             if not self._job_can_reset_cached_cell(target, col):
                 continue
+            cached_start = target.runtime.rop_default_start_frame
+            cached_end = target.runtime.rop_default_end_frame
+            cached_step = target.runtime.rop_default_step
             if col == 3:
                 try:
-                    rs = int(float(target.runtime_start_frame))
-                    re = int(float(target.runtime_end_frame))
+                    rs = int(float(cached_start))
+                    re = int(float(cached_end))
                 except Exception:
                     continue
                 if target.frame_range_mode == "use_rop":
@@ -3399,7 +3421,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 changed = True
             elif col == 4:
                 try:
-                    rstep = int(float(target.runtime_step))
+                    rstep = int(float(cached_step))
                 except Exception:
                     continue
                 if target.frame_range_mode == "use_rop":
@@ -5657,6 +5679,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_preferences.setEnabled(not scan_in_progress)
         if hasattr(self, "btn_reload_all_tree") and self.btn_reload_all_tree is not None:
             self.btn_reload_all_tree.setEnabled(hbatch_ok and not scan_in_progress and not self._render_job_active() and not path_sync_in_progress)
+        experimental_chunking_enabled = self._experimental_chunking_enabled()
+        self.chk_enable_chunking.setVisible(experimental_chunking_enabled)
+        self.spin_chunk_size.setVisible(experimental_chunking_enabled)
+        if not experimental_chunking_enabled and self.chk_enable_chunking.isChecked():
+            self.chk_enable_chunking.setChecked(False)
 
         has_queued = any(self._is_job_runnable(j) for j in self.jobs)
         selected = self._selected_job()
@@ -5669,9 +5696,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_stop_queue.setEnabled(self.queue_active or self._render_job_active())
         self.queue_file_menu_button.setEnabled(not scan_in_progress and not self._render_job_active() and not path_sync_in_progress)
         self.chk_disable_husk_mplay.setEnabled(not self.queue_active and not self._render_job_active())
-        self.chk_enable_chunking.setEnabled(not self.queue_active and not self._render_job_active())
+        self.chk_enable_chunking.setEnabled(experimental_chunking_enabled and not self.queue_active and not self._render_job_active())
         self.spin_chunk_size.setEnabled(
-            not self.queue_active and not self._render_job_active() and self.chk_enable_chunking.isChecked()
+            experimental_chunking_enabled and not self.queue_active and not self._render_job_active() and self.chk_enable_chunking.isChecked()
         )
         self.spin_auto_retry.setEnabled(not self.queue_active and not self._render_job_active())
         self.spin_retry_delay.setEnabled(not self.queue_active and not self._render_job_active())

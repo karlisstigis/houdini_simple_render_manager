@@ -51,6 +51,9 @@ class QueueTreeSyncTests(unittest.TestCase):
         self.assertEqual(job.runtime.runtime_start_frame, 300)
         self.assertEqual(job.runtime.runtime_end_frame, 320)
         self.assertEqual(job.runtime.runtime_step, 1)
+        self.assertEqual(job.runtime.rop_default_start_frame, 300)
+        self.assertEqual(job.runtime.rop_default_end_frame, 320)
+        self.assertEqual(job.runtime.rop_default_step, 1)
         self.assertEqual(job.view.out_file_sample_path, "D:/renders/CamTop.$F4.exr")
         self.assertEqual(restored, [job.id])
 

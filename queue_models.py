@@ -134,6 +134,9 @@ class RenderJobRuntime:
     runtime_start_frame: float | None = None
     runtime_end_frame: float | None = None
     runtime_step: float | None = None
+    rop_default_start_frame: float | None = None
+    rop_default_end_frame: float | None = None
+    rop_default_step: float | None = None
     allframesatonce_enabled: bool | None = None
     offline_previous_status: JobStatus | None = None
     resume_start_frame_runtime: int | None = None
@@ -210,6 +213,9 @@ _RUNTIME_FIELDS = {
     "runtime_start_frame",
     "runtime_end_frame",
     "runtime_step",
+    "rop_default_start_frame",
+    "rop_default_end_frame",
+    "rop_default_step",
     "allframesatonce_enabled",
     "offline_previous_status",
     "resume_start_frame_runtime",

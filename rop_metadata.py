@@ -97,3 +97,6 @@ def apply_rop_info_to_job(
         job.runtime_start_frame = info.runtime_start_frame
         job.runtime_end_frame = info.runtime_end_frame
         job.runtime_step = info.runtime_step
+        job.runtime.rop_default_start_frame = info.runtime_start_frame
+        job.runtime.rop_default_end_frame = info.runtime_end_frame
+        job.runtime.rop_default_step = info.runtime_step

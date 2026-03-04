@@ -34,6 +34,9 @@ class QueuePersistenceTests(unittest.TestCase):
         job.runtime.runtime_start_frame = 1001
         job.runtime.runtime_end_frame = 1010
         job.runtime.runtime_step = 2
+        job.runtime.rop_default_start_frame = 1000
+        job.runtime.rop_default_end_frame = 1009
+        job.runtime.rop_default_step = 1
         job.spec.device_override_mode = DeviceOverrideMode.SPECIFIC_GPUS
         job.spec.device_selection = "0,1"
         job.spec.render_all_frames_single_process = True
@@ -54,6 +57,9 @@ class QueuePersistenceTests(unittest.TestCase):
         self.assertEqual(cloned.runtime.status, job.runtime.status)
         self.assertEqual(cloned.spec.frame_handling_mode, job.spec.frame_handling_mode)
         self.assertEqual(cloned.runtime.error_summary, "boom")
+        self.assertEqual(cloned.runtime.rop_default_start_frame, 1000)
+        self.assertEqual(cloned.runtime.rop_default_end_frame, 1009)
+        self.assertEqual(cloned.runtime.rop_default_step, 1)
         self.assertEqual(cloned.spec.device_override_mode, DeviceOverrideMode.SPECIFIC_GPUS)
         self.assertEqual(cloned.spec.device_selection, "0,1")
         self.assertTrue(cloned.spec.render_all_frames_single_process)
@@ -92,6 +98,25 @@ class QueuePersistenceTests(unittest.TestCase):
         self.assertIsNotNone(cloned)
         assert cloned is not None
         self.assertTrue(cloned.spec.render_all_frames_single_process)
+
+    def test_old_payload_backfills_rop_defaults_from_runtime(self) -> None:
+        payload = {
+            "hip_path": "E:/shot/test.hip",
+            "rop_path": "/out/mantra1",
+            "frame_range_mode": "override",
+            "start_frame": 100,
+            "end_frame": 110,
+            "step": 1,
+            "runtime_start_frame": 100,
+            "runtime_end_frame": 110,
+            "runtime_step": 1,
+        }
+        cloned = job_from_persisted_dict(payload)
+        self.assertIsNotNone(cloned)
+        assert cloned is not None
+        self.assertEqual(cloned.runtime.rop_default_start_frame, 100)
+        self.assertEqual(cloned.runtime.rop_default_end_frame, 110)
+        self.assertEqual(cloned.runtime.rop_default_step, 1)
 
     def test_running_job_loads_back_as_canceled(self) -> None:
         job = RenderJob(hip_path="E:/shot/test.hip", rop_path="/out/mantra1", frame_range_mode="use_rop", status=JobStatus.RUNNING)

@@ -210,6 +210,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         player_path: str,
         theme: dict[str, str],
         runtime_defaults: dict[str, Any],
+        experimental_flags: dict[str, Any],
         device_defaults: dict[str, Any],
         logs_dir: str,
         discover_hbatch_fn: Callable[[], str],
@@ -223,7 +224,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._safe_message_fn = safe_message_fn
         self._theme_buttons: dict[str, ColorPickerButton] = {}
         self._logs_dir = Path(logs_dir)
-        self._build_ui(hbatch_path, player_path, theme, runtime_defaults, device_defaults, logs_dir)
+        self._build_ui(hbatch_path, player_path, theme, runtime_defaults, experimental_flags, device_defaults, logs_dir)
 
     def _build_ui(
         self,
@@ -231,6 +232,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         player_path: str,
         theme: dict[str, str],
         runtime_defaults: dict[str, Any],
+        experimental_flags: dict[str, Any],
         device_defaults: dict[str, Any],
         logs_dir: str,
     ) -> None:
@@ -423,15 +425,32 @@ class PreferencesDialog(QtWidgets.QDialog):
             label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
             return label
 
-        runtime_layout.addWidget(_runtime_label("Chunking Enabled"), 0, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        self.lbl_default_chunking_enabled = _runtime_label("Chunking Enabled")
+        runtime_layout.addWidget(self.lbl_default_chunking_enabled, 0, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
         runtime_layout.addWidget(self.chk_default_chunking_enabled, 0, 2, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
-        runtime_layout.addWidget(_runtime_label("Chunk Size"), 1, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        self.lbl_default_chunk_size = _runtime_label("Chunk Size")
+        runtime_layout.addWidget(self.lbl_default_chunk_size, 1, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
         runtime_layout.addWidget(self.spin_default_chunk_size, 1, 2)
         runtime_layout.addWidget(_runtime_label("Retry Count"), 2, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
         runtime_layout.addWidget(self.spin_default_retry_count, 2, 2)
         runtime_layout.addWidget(_runtime_label("Retry Delay (s)"), 3, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
         runtime_layout.addWidget(self.spin_default_retry_delay, 3, 2)
         runtime_panel = PanelFrame("Queue Runtime Defaults", runtime_host)
+
+        experimental_host = QtWidgets.QWidget()
+        experimental_host.setObjectName("transparentHost")
+        experimental_layout = QtWidgets.QGridLayout(experimental_host)
+        _configure_pref_grid(experimental_layout, 1)
+        self.chk_experimental_chunking = QtWidgets.QCheckBox("Enabled")
+        self.chk_experimental_chunking.setChecked(bool(experimental_flags.get("chunking", False)))
+        self.chk_experimental_chunking.toggled.connect(self._refresh_experimental_ui)
+        experimental_label = QtWidgets.QLabel("Chunking")
+        experimental_label.setObjectName("parameterLabel")
+        experimental_label.setFixedWidth(label_width)
+        experimental_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        experimental_layout.addWidget(experimental_label, 0, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        experimental_layout.addWidget(self.chk_experimental_chunking, 0, 2, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        experimental_panel = PanelFrame("Experimental", experimental_host)
 
         device_host = QtWidgets.QWidget()
         device_host.setObjectName("transparentHost")
@@ -605,6 +624,7 @@ class PreferencesDialog(QtWidgets.QDialog):
 
         scroll_layout.addWidget(settings_panel)
         scroll_layout.addWidget(player_settings_panel)
+        scroll_layout.addWidget(experimental_panel)
         scroll_layout.addWidget(runtime_panel)
         scroll_layout.addWidget(device_panel)
         scroll_layout.addWidget(logs_panel)
@@ -613,6 +633,7 @@ class PreferencesDialog(QtWidgets.QDialog):
 
         scroll.setWidget(scroll_host)
         root.addWidget(scroll, 1)
+        self._refresh_experimental_ui()
 
     def _browse_hbatch(self) -> None:
         current = self.hbatch_edit.text().strip()
@@ -719,6 +740,17 @@ class PreferencesDialog(QtWidgets.QDialog):
         self.default_usd_output_custom_path.setEnabled(enable_custom_usd_path)
         self.btn_browse_default_usd_output_custom_path.setEnabled(enable_custom_usd_path)
 
+    def _refresh_experimental_ui(self) -> None:
+        chunking_enabled = bool(self.chk_experimental_chunking.isChecked())
+        for widget in (
+            getattr(self, "lbl_default_chunking_enabled", None),
+            getattr(self, "chk_default_chunking_enabled", None),
+            getattr(self, "lbl_default_chunk_size", None),
+            getattr(self, "spin_default_chunk_size", None),
+        ):
+            if widget is not None:
+                widget.setVisible(chunking_enabled)
+
     def values(self) -> dict[str, Any]:
         theme = {key: btn.color_hex() for key, btn in self._theme_buttons.items()}
         theme["panel_gap"] = int(self.panel_gap_spin.value())
@@ -731,6 +763,9 @@ class PreferencesDialog(QtWidgets.QDialog):
                 "chunk_size": int(self.spin_default_chunk_size.value()),
                 "retry_count": int(self.spin_default_retry_count.value()),
                 "retry_delay": int(self.spin_default_retry_delay.value()),
+            },
+            "experimental_flags": {
+                "chunking": bool(self.chk_experimental_chunking.isChecked()),
             },
             "device_defaults": {
                 "mode": str(self.default_device_mode.currentData() or DeviceOverrideMode.DEFAULT.value),

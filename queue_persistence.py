@@ -44,6 +44,9 @@ def job_to_persisted_dict(job: RenderJob) -> dict[str, Any]:
         "runtime_start_frame": job.runtime.runtime_start_frame,
         "runtime_end_frame": job.runtime.runtime_end_frame,
         "runtime_step": job.runtime.runtime_step,
+        "rop_default_start_frame": job.runtime.rop_default_start_frame,
+        "rop_default_end_frame": job.runtime.rop_default_end_frame,
+        "rop_default_step": job.runtime.rop_default_step,
         "chunk_start_frame_runtime": job.runtime.chunk_start_frame_runtime,
         "chunk_end_frame_runtime": job.runtime.chunk_end_frame_runtime,
         "chunk_step_runtime": job.runtime.chunk_step_runtime,
@@ -129,6 +132,17 @@ def job_from_persisted_dict(data: dict[str, Any], *, active_job_id: str | None =
         job.runtime.runtime_start_frame = data.get("runtime_start_frame")
         job.runtime.runtime_end_frame = data.get("runtime_end_frame")
         job.runtime.runtime_step = data.get("runtime_step")
+        job.runtime.rop_default_start_frame = data.get("rop_default_start_frame")
+        job.runtime.rop_default_end_frame = data.get("rop_default_end_frame")
+        job.runtime.rop_default_step = data.get("rop_default_step")
+        # Migration for older queue payloads that predate persistent ROP defaults.
+        # Use stored runtime range only to seed missing defaults at load time.
+        if job.runtime.rop_default_start_frame is None and job.runtime.runtime_start_frame is not None:
+            job.runtime.rop_default_start_frame = job.runtime.runtime_start_frame
+        if job.runtime.rop_default_end_frame is None and job.runtime.runtime_end_frame is not None:
+            job.runtime.rop_default_end_frame = job.runtime.runtime_end_frame
+        if job.runtime.rop_default_step is None and job.runtime.runtime_step not in (None, 0):
+            job.runtime.rop_default_step = job.runtime.runtime_step
         job.runtime.chunk_start_frame_runtime = data.get("chunk_start_frame_runtime")
         job.runtime.chunk_end_frame_runtime = data.get("chunk_end_frame_runtime")
         job.runtime.chunk_step_runtime = data.get("chunk_step_runtime")

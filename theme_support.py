@@ -247,6 +247,9 @@ def build_app_stylesheet(theme: dict[str, str], icons: dict[str, str]) -> str:
     t = normalize_theme_colors(theme)
     panel_header_bg = QtGui.QColor(t["panel_bg"]).lighter(120).name()
     panel_border = QtGui.QColor(t["panel_bg"]).lighter(135).name()
+    button_base = QtGui.QColor(t["button_bg"])
+    button_hover_bg = button_base.lighter(112).name()
+    button_pressed_bg = button_base.lighter(106).name()
     sel_row_rgba = QtGui.QColor(t["selection_row"])
     sel_row_alt_rgba = QtGui.QColor(t["selection_row_alt"])
     try:
@@ -375,6 +378,14 @@ def build_app_stylesheet(theme: dict[str, str], icons: dict[str, str]) -> str:
             border: 1px solid #555;
             border-radius: 3px;
             padding: 4px 8px;
+        }}
+        QPushButton:hover:!disabled {{
+            background-color: {button_hover_bg};
+            border: 1px solid #666;
+        }}
+        QPushButton:pressed:!disabled {{
+            background-color: {button_pressed_bg};
+            border: 1px solid #666;
         }}
         QPushButton:disabled {{
             color: #8a8a8a;
@@ -607,6 +618,37 @@ def build_app_stylesheet(theme: dict[str, str], icons: dict[str, str]) -> str:
             color: #ffffff;
         }}
         QListWidget#ropList::item:hover {{
+            background-color: #4a4a4a;
+        }}
+        QListWidget#notificationsList {{
+            background-color: #353535;
+            alternate-background-color: #383838;
+            color: {t['button_text']};
+            border: none;
+            border-radius: 0px;
+            outline: 0;
+            padding: 0px;
+            selection-background-color: #575757;
+            selection-color: #ffffff;
+        }}
+        QListWidget#notificationsList::item {{
+            padding: 7px 10px;
+            border-radius: 0px;
+            background: transparent;
+        }}
+        QListWidget#notificationsList::item:selected,
+        QListWidget#notificationsList::item:selected:active,
+        QListWidget#notificationsList::item:selected:!active {{
+            background-color: {sel_row_css};
+            color: #ffffff;
+        }}
+        QListWidget#notificationsList::item:selected:alternate,
+        QListWidget#notificationsList::item:selected:alternate:active,
+        QListWidget#notificationsList::item:selected:alternate:!active {{
+            background-color: {sel_row_alt_css};
+            color: #ffffff;
+        }}
+        QListWidget#notificationsList::item:hover {{
             background-color: #4a4a4a;
         }}
         QTreeView#queueTree {{

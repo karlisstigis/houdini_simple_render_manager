@@ -146,12 +146,15 @@ class QueueTableModel(QtCore.QAbstractTableModel):
 
     @staticmethod
     def _override_flags(job: RenderJob) -> tuple[bool, bool]:
+        cached_start = job.runtime.rop_default_start_frame
+        cached_end = job.runtime.rop_default_end_frame
+        cached_step = job.runtime.rop_default_step
         range_is_overridden = False
         step_is_overridden = False
         if job.spec.frame_range_mode == "override":
             if (
-                job.runtime.runtime_start_frame is None
-                or job.runtime.runtime_end_frame is None
+                cached_start is None
+                or cached_end is None
                 or job.spec.start_frame is None
                 or job.spec.end_frame is None
             ):
@@ -159,17 +162,17 @@ class QueueTableModel(QtCore.QAbstractTableModel):
             else:
                 try:
                     range_is_overridden = not (
-                        int(job.spec.start_frame) == int(job.runtime.runtime_start_frame)
-                        and int(job.spec.end_frame) == int(job.runtime.runtime_end_frame)
+                        int(job.spec.start_frame) == int(cached_start)
+                        and int(job.spec.end_frame) == int(cached_end)
                     )
                 except Exception:
                     range_is_overridden = True
 
-            if job.runtime.runtime_step in (None, 0) or job.spec.step is None:
+            if cached_step in (None, 0) or job.spec.step is None:
                 step_is_overridden = True
             else:
                 try:
-                    step_is_overridden = int(job.spec.step) != int(float(job.runtime.runtime_step))
+                    step_is_overridden = int(job.spec.step) != int(float(cached_step))
                 except Exception:
                     step_is_overridden = True
         return range_is_overridden, step_is_overridden

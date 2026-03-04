@@ -55,9 +55,9 @@ def build_queue_tree_panel(
     footer_layout = QtWidgets.QHBoxLayout(footer)
     footer_layout.setContentsMargins(8, 8, 8, 8)
     footer_layout.setSpacing(8)
-    footer_layout.addStretch(1)
     reload_all_button = QtWidgets.QPushButton("Reload All")
     footer_layout.addWidget(reload_all_button)
+    footer_layout.addStretch(1)
     tree_layout.addWidget(footer)
 
     layout.addWidget(queue_tree_frame, 1)
