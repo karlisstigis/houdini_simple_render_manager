@@ -119,6 +119,16 @@ from queue_tree_sync import (
     sync_jobs_after_path_change as sync_jobs_after_path_change_model,
     validate_queue_path_value as validate_queue_path_value_model,
 )
+from job_properties_actions import (
+    JobPropertyEditSpec,
+    device_mode_edit_spec as device_mode_edit_spec_model,
+    device_selection_edit_spec as device_selection_edit_spec_model,
+    retain_built_usd_edit_spec as retain_built_usd_edit_spec_model,
+    reuse_retained_usd_edit_spec as reuse_retained_usd_edit_spec_model,
+    single_process_render_edit_spec as single_process_render_edit_spec_model,
+    usd_output_directory_custom_path_edit_spec as usd_output_directory_custom_path_edit_spec_model,
+    usd_output_directory_mode_edit_spec as usd_output_directory_mode_edit_spec_model,
+)
 from job_properties_state import (
     build_job_properties_panel_state as build_job_properties_panel_state_model,
     default_job_properties_panel_state as default_job_properties_panel_state_model,
@@ -2668,82 +2678,34 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
 
-    def _on_job_properties_device_mode_changed(self, value: str) -> None:
-        mode = DeviceOverrideMode.coerce(value)
+    def _apply_job_property_edit_spec(self, spec: JobPropertyEditSpec) -> None:
+        property_name, apply_fn = spec
         self._apply_job_property_edit(
-            property_name="device_override_mode",
-            apply_fn=lambda job: (False if job.spec.device_override_mode is mode else setattr(job.spec, "device_override_mode", mode) or True),
+            property_name=property_name,
+            apply_fn=apply_fn,
             target_jobs=self._selected_jobs(),
         )
+
+    def _on_job_properties_device_mode_changed(self, value: str) -> None:
+        self._apply_job_property_edit_spec(device_mode_edit_spec_model(value))
 
     def _on_job_properties_device_selection_changed(self, value: str) -> None:
-        normalized = RenderJob.normalize_device_selection(value)
-        self._apply_job_property_edit(
-            property_name="device_selection",
-            apply_fn=lambda job: (False if job.spec.device_selection == normalized else setattr(job.spec, "device_selection", normalized) or True),
-            target_jobs=self._selected_jobs(),
-        )
+        self._apply_job_property_edit_spec(device_selection_edit_spec_model(value))
 
     def _on_job_properties_retain_built_usd_changed(self, checked: bool) -> None:
-        self._apply_job_property_edit(
-            property_name="retain_built_usd",
-            apply_fn=lambda job: (
-                False
-                if bool(job.spec.retain_built_usd) == bool(checked) and (bool(checked) or not bool(job.spec.reuse_retained_usd))
-                else (
-                    setattr(job.spec, "retain_built_usd", bool(checked))
-                    or (setattr(job.spec, "reuse_retained_usd", False) if not bool(checked) else False)
-                    or True
-                )
-            ),
-            target_jobs=self._selected_jobs(),
-        )
+        self._apply_job_property_edit_spec(retain_built_usd_edit_spec_model(checked))
 
     def _on_job_properties_render_all_frames_single_process_changed(self, checked: bool) -> None:
-        self._apply_job_property_edit(
-            property_name="render_all_frames_single_process",
-            apply_fn=lambda job: (
-                False
-                if bool(job.spec.render_all_frames_single_process) == bool(checked)
-                else setattr(job.spec, "render_all_frames_single_process", bool(checked)) or True
-            ),
-            target_jobs=self._selected_jobs(),
-        )
+        self._apply_job_property_edit_spec(single_process_render_edit_spec_model(checked))
 
     def _on_job_properties_reuse_retained_usd_changed(self, checked: bool) -> None:
-        self._apply_job_property_edit(
-            property_name="reuse_retained_usd",
-            apply_fn=lambda job: (
-                False
-                if bool(job.spec.reuse_retained_usd) == bool(checked)
-                else setattr(job.spec, "reuse_retained_usd", bool(checked)) or True
-            ),
-            target_jobs=self._selected_jobs(),
-        )
+        self._apply_job_property_edit_spec(reuse_retained_usd_edit_spec_model(checked))
 
     def _on_job_properties_usd_output_directory_mode_changed(self, value: str) -> None:
-        mode = UsdOutputDirectoryMode.coerce(value)
-        self._apply_job_property_edit(
-            property_name="usd_output_directory_mode",
-            apply_fn=lambda job: (
-                False
-                if job.spec.usd_output_directory_mode is mode
-                else setattr(job.spec, "usd_output_directory_mode", mode) or True
-            ),
-            target_jobs=self._selected_jobs(),
-        )
+        self._apply_job_property_edit_spec(usd_output_directory_mode_edit_spec_model(value))
 
     def _on_job_properties_usd_output_directory_custom_path_changed(self, value: str) -> None:
-        normalized = str(value or "").strip()
-        self._apply_job_property_edit(
-            property_name="usd_output_directory_custom_path",
-            apply_fn=lambda job: (
-                False
-                if str(job.spec.usd_output_directory_custom_path or "") == normalized
-                else setattr(job.spec, "usd_output_directory_custom_path", normalized) or True
-            ),
-            target_jobs=self._selected_jobs(),
-        )
+        self._apply_job_property_edit_spec(usd_output_directory_custom_path_edit_spec_model(value))
 
     def _reveal_selected_retained_usd(self) -> None:
         paths = self._selected_retained_usd_paths()
