@@ -119,6 +119,10 @@ from queue_tree_sync import (
     sync_jobs_after_path_change as sync_jobs_after_path_change_model,
     validate_queue_path_value as validate_queue_path_value_model,
 )
+from job_properties_state import (
+    build_job_properties_panel_state as build_job_properties_panel_state_model,
+    default_job_properties_panel_state as default_job_properties_panel_state_model,
+)
 from render_session import RenderSessionController, RenderSessionHooks
 from recovery_reporting import build_startup_recovery_summary
 from scan_coordinator import ScanCoordinator, ScanCoordinatorHooks
@@ -2413,26 +2417,12 @@ class MainWindow(QtWidgets.QMainWindow):
         clear_retained_usd_runtime_model(job)
 
     def _job_properties_panel_default_state(self) -> dict[str, Any]:
-        check_state_value = lambda state: int(getattr(state, "value", state))
         default_usd_output_mode = self._default_usd_output_directory_mode()
-        return {
-            "name_text": "-",
-            "file_text": "-",
-            "rop_text": "-",
-            "editable": False,
-            "device_mode": DeviceOverrideMode.DEFAULT.value,
-            "show_custom_devices": False,
-            "device_options": [],
-            "device_selection_enabled": False,
-            "single_process_render_check_state": check_state_value(QtCore.Qt.CheckState.Unchecked),
-            "retain_check_state": check_state_value(QtCore.Qt.CheckState.Unchecked),
-            "reuse_check_state": check_state_value(QtCore.Qt.CheckState.Unchecked),
-            "reuse_enabled": False,
-            "mixed_usd_output_mode": False,
-            "usd_output_directory_mode": default_usd_output_mode.value,
-            "usd_output_directory_custom_path": self._default_usd_output_directory_custom_path(),
-            **retained_usd_panel_default_fields_model(),
-        }
+        return default_job_properties_panel_state_model(
+            default_usd_output_mode=default_usd_output_mode.value,
+            default_usd_output_custom_path=self._default_usd_output_directory_custom_path(),
+            retained_usd_defaults=retained_usd_panel_default_fields_model(),
+        )
 
     def _single_job_retained_usd_panel_state(self, job: RenderJob) -> dict[str, Any]:
         return single_job_retained_usd_panel_state_model(
@@ -2602,7 +2592,9 @@ class MainWindow(QtWidgets.QMainWindow):
         panel = getattr(self, "job_properties_panel", None)
         if panel is None:
             return
-        check_state_value = lambda state: int(getattr(state, "value", state))
+        unchecked_state = int(getattr(QtCore.Qt.CheckState.Unchecked, "value", QtCore.Qt.CheckState.Unchecked))
+        checked_state = int(getattr(QtCore.Qt.CheckState.Checked, "value", QtCore.Qt.CheckState.Checked))
+        partial_state = int(getattr(QtCore.Qt.CheckState.PartiallyChecked, "value", QtCore.Qt.CheckState.PartiallyChecked))
         selected_jobs = self._selected_jobs()
         if not selected_jobs:
             panel.set_state(self._job_properties_panel_default_state())
@@ -2640,46 +2632,40 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         panel.set_state(
-            {
-                "name_text": "Mixed" if mixed_name else str(first_name or "-"),
-                "file_text": "Mixed" if mixed_file else str(first_file or "-"),
-                "rop_text": "Mixed" if mixed_rop else str(first_rop or "-"),
-                "editable": editable,
-                "mixed_device_mode": mixed_device_mode,
-                "device_mode": first_device_mode or DeviceOverrideMode.DEFAULT.value,
-                "show_custom_devices": show_custom_devices,
-                "device_options": self._device_option_states_for_jobs(
+            build_job_properties_panel_state_model(
+                mixed_name=mixed_name,
+                first_name=first_name,
+                mixed_file=mixed_file,
+                first_file=first_file,
+                mixed_rop=mixed_rop,
+                first_rop=first_rop,
+                editable=editable,
+                mixed_device_mode=mixed_device_mode,
+                first_device_mode=first_device_mode,
+                show_custom_devices=show_custom_devices,
+                device_options=self._device_option_states_for_jobs(
                     selected_jobs,
                     show_custom_devices=show_custom_devices,
                     editable=editable,
                 ),
-                "device_selection_enabled": show_custom_devices,
-                "single_process_render_check_state": check_state_value(
-                    QtCore.Qt.CheckState.PartiallyChecked if mixed_single_process
-                    else (QtCore.Qt.CheckState.Checked if first_single_process else QtCore.Qt.CheckState.Unchecked)
-                ),
-                "retain_check_state": check_state_value(
-                    QtCore.Qt.CheckState.PartiallyChecked if mixed_retain
-                    else (QtCore.Qt.CheckState.Checked if first_retain else QtCore.Qt.CheckState.Unchecked)
-                ),
-                "reuse_check_state": check_state_value(
-                    QtCore.Qt.CheckState.PartiallyChecked if mixed_reuse
-                    else (QtCore.Qt.CheckState.Checked if first_reuse else QtCore.Qt.CheckState.Unchecked)
-                ),
-                "reuse_enabled": editable and bool(first_retain or mixed_retain),
-                "mixed_usd_output_mode": mixed_usd_output_mode,
-                "usd_output_directory_mode": first_usd_output_mode or UsdOutputDirectoryMode.DEFAULT_TEMP.value,
-                "mixed_usd_output_custom_path": mixed_usd_output_custom_path,
-                "usd_output_directory_custom_path": "" if mixed_usd_output_custom_path else str(first_usd_output_custom_path or ""),
-                "retained_usd_path": retained_usd_state["retained_usd_path"],
-                "retained_usd_built_range": retained_usd_state["retained_usd_built_range"],
-                "retained_usd_built_step": retained_usd_state["retained_usd_built_step"],
-                "retained_usd_built_at": retained_usd_state["retained_usd_built_at"],
-                "retained_usd_status": retained_usd_state["retained_usd_status"],
-                "retained_usd_warning": retained_usd_state["retained_usd_warning"],
-                "can_open": bool(retained_usd_state["can_open"]),
-                "can_delete": can_delete,
-            }
+                mixed_single_process=mixed_single_process,
+                first_single_process=bool(first_single_process),
+                mixed_retain=mixed_retain,
+                first_retain=bool(first_retain),
+                mixed_reuse=mixed_reuse,
+                first_reuse=bool(first_reuse),
+                mixed_usd_output_mode=mixed_usd_output_mode,
+                first_usd_output_mode=first_usd_output_mode,
+                mixed_usd_output_custom_path=mixed_usd_output_custom_path,
+                first_usd_output_custom_path=str(first_usd_output_custom_path or ""),
+                retained_usd_state=retained_usd_state,
+                can_delete=can_delete,
+                unchecked_state=unchecked_state,
+                checked_state=checked_state,
+                partial_state=partial_state,
+                default_device_mode=DeviceOverrideMode.DEFAULT.value,
+                default_usd_output_mode=UsdOutputDirectoryMode.DEFAULT_TEMP.value,
+            )
         )
 
     def _on_job_properties_device_mode_changed(self, value: str) -> None:
