@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app_preferences_flow import (
+from flows.app_preferences_flow import (
     dialog_device_defaults,
     dialog_experimental_flags,
     dialog_runtime_defaults,

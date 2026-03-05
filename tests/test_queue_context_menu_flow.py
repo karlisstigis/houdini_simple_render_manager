@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from queue_context_menu_flow import (
+from flows.queue_context_menu_flow import (
     apply_job_mutation_with_history,
     build_queue_context_menu_availability,
     queue_context_action_key,

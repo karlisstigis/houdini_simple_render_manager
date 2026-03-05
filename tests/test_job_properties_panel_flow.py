@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from job_properties_panel_flow import build_job_properties_state_for_selection
+from flows.job_properties_panel_flow import build_job_properties_state_for_selection
 from queue_models import DeviceOverrideMode, RenderJob
 
 

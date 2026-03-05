@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from queue_start_flow import evaluate_job_start_preflight, start_queue_mode
+from flows.queue_start_flow import evaluate_job_start_preflight, start_queue_mode
 
 
 class QueueStartFlowTests(unittest.TestCase):

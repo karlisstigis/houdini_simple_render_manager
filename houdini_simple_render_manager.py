@@ -24,7 +24,7 @@ from action_policy import (
     can_resume_job_from_output,
     is_job_runnable,
 )
-from app_preferences_flow import (
+from flows.app_preferences_flow import (
     dialog_device_defaults as dialog_device_defaults_model,
     dialog_experimental_flags as dialog_experimental_flags_model,
     dialog_runtime_defaults as dialog_runtime_defaults_model,
@@ -115,7 +115,7 @@ from queue_lifecycle import (
 )
 from queue_run_reporting import build_queue_run_summary as build_queue_run_summary_model
 from queue_run_reporting import write_queue_snapshot as write_queue_snapshot_model
-from queue_reload_flow import (
+from flows.queue_reload_flow import (
     defer_reload_values_from_file as defer_reload_values_from_file_model,
     run_reload_all_jobs_from_file as run_reload_all_jobs_from_file_model,
 )
@@ -141,7 +141,7 @@ from queue_output_paths import (
     normalize_output_display_path as normalize_output_display_path_model,
     output_folder_from_value as output_folder_from_value_model,
 )
-from queue_context_menu_flow import (
+from flows.queue_context_menu_flow import (
     apply_job_mutation_with_history as apply_job_mutation_with_history_model,
     build_queue_context_menu_availability as build_queue_context_menu_availability_model,
     queue_context_action_key as queue_context_action_key_model,
@@ -202,7 +202,9 @@ from job_properties_actions import (
 from job_properties_state import (
     default_job_properties_panel_state as default_job_properties_panel_state_model,
 )
-from job_properties_panel_flow import build_job_properties_state_for_selection as build_job_properties_state_for_selection_model
+from flows.job_properties_panel_flow import (
+    build_job_properties_state_for_selection as build_job_properties_state_for_selection_model,
+)
 from render_session import RenderSessionController, RenderSessionHooks
 from recovery_reporting import build_startup_recovery_summary
 from scan_coordinator import ScanCoordinator, ScanCoordinatorHooks
@@ -276,7 +278,7 @@ from queue_output_probe import (
     needs_pattern_refresh as needs_pattern_refresh_model,
     path_exists_nonempty as path_exists_nonempty_model,
 )
-from queue_output_resolution_flow import (
+from flows.queue_output_resolution_flow import (
     maybe_refresh_probe_path as maybe_refresh_probe_path_model,
     probe_pattern_resolved as probe_pattern_resolved_model,
 )
@@ -295,11 +297,11 @@ from queue_start_control import (
     should_set_selected_rerun_status as should_set_selected_rerun_status_model,
     start_queue_runnable_state as start_queue_runnable_state_model,
 )
-from queue_start_flow import (
+from flows.queue_start_flow import (
     evaluate_job_start_preflight as evaluate_job_start_preflight_model,
     start_queue_mode as start_queue_mode_model,
 )
-from queue_state_io import (
+from flows.queue_state_io import (
     load_queue_state as load_queue_state_model,
     save_queue_state as save_queue_state_model,
 )

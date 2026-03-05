@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from queue_output_resolution_flow import maybe_refresh_probe_path, probe_pattern_resolved
+from flows.queue_output_resolution_flow import maybe_refresh_probe_path, probe_pattern_resolved
 
 
 class _Info:

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from queue_state_io import load_queue_state, save_queue_state
+from flows.queue_state_io import load_queue_state, save_queue_state
 
 
 class QueueStateIoTests(unittest.TestCase):
