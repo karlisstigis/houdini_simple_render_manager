@@ -135,6 +135,11 @@ from queue_output_paths import (
     normalize_output_display_path as normalize_output_display_path_model,
     output_folder_from_value as output_folder_from_value_model,
 )
+from queue_context_menu_flow import (
+    apply_job_mutation_with_history as apply_job_mutation_with_history_model,
+    build_queue_context_menu_availability as build_queue_context_menu_availability_model,
+    queue_context_action_key as queue_context_action_key_model,
+)
 from preview_paths import resolve_job_preview_path as resolve_job_preview_path_model
 from queue_frame_scan import (
     first_missing_frame_and_contiguous_done as first_missing_frame_and_contiguous_done_model,
@@ -3355,37 +3360,18 @@ class MainWindow(QtWidgets.QMainWindow):
         out_folder = self._output_folder_from_value(job.view.out_path)
         has_finished_jobs = any(j.runtime.status in {JobStatus.DONE, JobStatus.FAILED} for j in self.jobs)
         any_locked = any(self._is_job_path_sync_locked(j) for j in target_jobs)
-        act_toggle = menu.addAction("Disable" if job.spec.enabled else "Enable")
-        act_toggle.setEnabled((not any_active) and (not any_locked))
-        act_reset = menu.addAction("Reset State")
-        act_reset.setEnabled((not any_active) and (not any_locked))
-        act_reset_cell_cached = None
-        if idx.isValid() and idx.column() in {3, 4}:
-            menu.addSeparator()
-            act_reset_cell_cached = menu.addAction("Reset Value")
-            act_reset_cell_cached.setEnabled((not any_locked) and any(self._job_can_reset_cached_cell(t, idx.column()) for t in target_jobs))
-        act_reload_from_rop = menu.addAction("Reload Values from File")
         reload_decision = can_reload_jobs_from_file(
             target_jobs=target_jobs,
             is_active_job_fn=self._is_active_job,
             hbatch_exists=self._hbatch_exists(),
             is_locked_job_fn=self._is_job_path_sync_locked,
         )
-        act_reload_from_rop.setEnabled(reload_decision.allowed)
-        menu.addSeparator()
         duplicate_decision = can_duplicate_jobs(
             target_jobs,
             is_active_job_fn=self._is_active_job,
             scan_in_progress=self._scan_in_progress(),
             is_locked_job_fn=self._is_job_path_sync_locked,
         )
-        act_duplicate = menu.addAction("Duplicate")
-        act_duplicate.setEnabled(duplicate_decision.allowed)
-        act_remove = menu.addAction("Remove")
-        act_remove.setEnabled((not any_active) and (not any_locked))
-        act_clear_finished = menu.addAction("Clear Finished")
-        act_clear_finished.setEnabled(has_finished_jobs)
-        menu.addSeparator()
         preview_path = self._job_preview_path(job)
         preview_player_path = self._current_player_path()
         preview_decision = can_preview_job(
@@ -3393,55 +3379,86 @@ class MainWindow(QtWidgets.QMainWindow):
             player_path_set=bool(preview_player_path),
             player_exists=bool(preview_player_path and Path(preview_player_path).exists()),
         )
-        act_preview = menu.addAction("Preview")
-        act_preview.setEnabled(preview_decision.allowed)
-        act_open_folder = menu.addAction("Open Folder")
         open_folder_decision = can_open_output_folder(folder_exists=bool(out_folder and out_folder.exists()))
-        act_open_folder.setEnabled(open_folder_decision.allowed)
+        reset_value_allowed = bool(
+            idx.isValid() and idx.column() in {3, 4} and any(self._job_can_reset_cached_cell(t, idx.column()) for t in target_jobs)
+        )
+        availability = build_queue_context_menu_availability_model(
+            job_enabled=bool(job.spec.enabled),
+            any_active=bool(any_active),
+            any_locked=bool(any_locked),
+            has_finished_jobs=bool(has_finished_jobs),
+            reset_value_allowed=bool(reset_value_allowed),
+            reload_allowed=bool(reload_decision.allowed),
+            duplicate_allowed=bool(duplicate_decision.allowed),
+            preview_allowed=bool(preview_decision.allowed),
+            open_folder_allowed=bool(open_folder_decision.allowed),
+        )
+        act_toggle = menu.addAction(availability.toggle_text)
+        act_toggle.setEnabled(availability.toggle_enabled)
+        act_reset = menu.addAction("Reset State")
+        act_reset.setEnabled(availability.reset_enabled)
+        act_reset_cell_cached = None
+        if idx.isValid() and idx.column() in {3, 4}:
+            menu.addSeparator()
+            act_reset_cell_cached = menu.addAction("Reset Value")
+            act_reset_cell_cached.setEnabled(availability.reset_value_enabled)
+        act_reload_from_rop = menu.addAction("Reload Values from File")
+        act_reload_from_rop.setEnabled(availability.reload_enabled)
+        menu.addSeparator()
+        act_duplicate = menu.addAction("Duplicate")
+        act_duplicate.setEnabled(availability.duplicate_enabled)
+        act_remove = menu.addAction("Remove")
+        act_remove.setEnabled(availability.remove_enabled)
+        act_clear_finished = menu.addAction("Clear Finished")
+        act_clear_finished.setEnabled(availability.clear_finished_enabled)
+        menu.addSeparator()
+        act_preview = menu.addAction("Preview")
+        act_preview.setEnabled(availability.preview_enabled)
+        act_open_folder = menu.addAction("Open Folder")
+        act_open_folder.setEnabled(availability.open_folder_enabled)
 
         chosen = menu.exec(self.queue_table.viewport().mapToGlobal(pos))
         if chosen is None:
             return
-        if chosen == act_preview:
+        action_key = queue_context_action_key_model(
+            chosen,
+            {
+                "preview": act_preview,
+                "open_folder": act_open_folder,
+                "toggle": act_toggle,
+                "reset": act_reset,
+                "reset_value": act_reset_cell_cached,
+                "reload_from_rop": act_reload_from_rop,
+                "duplicate": act_duplicate,
+                "remove": act_remove,
+                "clear_finished": act_clear_finished,
+            },
+        )
+        if action_key == "preview":
             self._preview_job(job)
-        elif chosen == act_open_folder and out_folder is not None:
+        elif action_key == "open_folder" and out_folder is not None:
             QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(out_folder)))
-        elif chosen == act_toggle:
+        elif action_key == "toggle":
             new_enabled = not job.spec.enabled
-            target_ids = [j.id for j in target_jobs]
-            before_states = self._job_states_for_ids(target_ids)
-            for target in target_jobs:
-                if not self._is_active_job(target):
-                    target.enabled = new_enabled
-            after_states = self._job_states_for_ids(target_ids)
-            self._push_history_command(
-                {
-                    "kind": "update_jobs",
-                    "before": before_states,
-                    "after": after_states,
-                    "undo_select_job_ids": target_ids,
-                    "redo_select_job_ids": target_ids,
-                }
+            apply_job_mutation_with_history_model(
+                target_jobs,
+                is_active_job=self._is_active_job,
+                mutate_job=lambda target: setattr(target, "enabled", new_enabled),
+                job_states_for_ids=self._job_states_for_ids,
+                push_history_command=self._push_history_command,
+                save_and_refresh_queue=lambda ids: self._save_and_refresh_queue(select_job_ids=ids),
             )
-            self._save_and_refresh_queue(select_job_ids=[j.id for j in target_jobs])
-        elif chosen == act_reset:
-            target_ids = [j.id for j in target_jobs]
-            before_states = self._job_states_for_ids(target_ids)
-            for target in target_jobs:
-                if not self._is_active_job(target):
-                    self._reset_job_state(target)
-            after_states = self._job_states_for_ids(target_ids)
-            self._push_history_command(
-                {
-                    "kind": "update_jobs",
-                    "before": before_states,
-                    "after": after_states,
-                    "undo_select_job_ids": target_ids,
-                    "redo_select_job_ids": target_ids,
-                }
+        elif action_key == "reset":
+            apply_job_mutation_with_history_model(
+                target_jobs,
+                is_active_job=self._is_active_job,
+                mutate_job=self._reset_job_state,
+                job_states_for_ids=self._job_states_for_ids,
+                push_history_command=self._push_history_command,
+                save_and_refresh_queue=lambda ids: self._save_and_refresh_queue(select_job_ids=ids),
             )
-            self._save_and_refresh_queue(select_job_ids=[j.id for j in target_jobs])
-        elif act_reset_cell_cached is not None and chosen == act_reset_cell_cached:
+        elif action_key == "reset_value":
             target_ids = [j.id for j in target_jobs]
             before_states = self._job_states_for_ids(target_ids)
             if idx.isValid() and idx.column() in {3, 4} and self._reset_cached_cell_for_jobs(idx.column(), target_jobs):
@@ -3456,7 +3473,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     }
                 )
                 self._save_and_refresh_queue(select_job_ids=[j.id for j in target_jobs])
-        elif chosen == act_reload_from_rop:
+        elif action_key == "reload_from_rop":
             if not reload_decision.allowed:
                 safe_message(self, "Reload From File", reload_decision.reason)
                 return
@@ -3464,11 +3481,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 target_jobs,
                 defer_reload_jobs_from_file=self._defer_reload_jobs_from_file,
             )
-        elif chosen == act_duplicate:
+        elif action_key == "duplicate":
             self._duplicate_selected_jobs()
-        elif chosen == act_remove:
+        elif action_key == "remove":
             self._remove_selected_job()
-        elif chosen == act_clear_finished:
+        elif action_key == "clear_finished":
             self._clear_finished_jobs()
 
     def _resolve_job_range_for_execution(
