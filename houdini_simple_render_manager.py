@@ -223,6 +223,18 @@ from notification_rules import (
     notification_messages_for_log as notification_messages_for_log_model,
     notification_summary_for_line as notification_summary_for_line_model,
 )
+from notification_list_state import (
+    normalized_notification as normalized_notification_model,
+    notification_color_hex as notification_color_hex_model,
+    notification_signature as notification_signature_model,
+    should_add_notification as should_add_notification_model,
+    trim_notification_count as trim_notification_count_model,
+)
+from queue_selection_helpers import (
+    mixed_value as mixed_value_model,
+    selected_row_from_view_rows as selected_row_from_view_rows_model,
+    source_rows_from_view_rows as source_rows_from_view_rows_model,
+)
 from theme_support import DEFAULT_THEME, build_app_stylesheet, ensure_theme_icons, normalize_theme_colors
 from widgets import AddJobPanel, CleanStepSpinBox, JobPropertiesPanel, PanelFrame, PreferencesDialog, QueueTableItemDelegate, QueueTableWidget, RopListWidget
 from worker_client import RenderWorkerClient, ScanWorkerClient
@@ -2292,13 +2304,19 @@ class MainWindow(QtWidgets.QMainWindow):
         return proxy.mapFromSource(source_index)
 
     def _queue_source_rows_from_view_rows(self, view_rows: list[int]) -> list[int]:
-        source_rows = [self._queue_source_row_from_view_row(row) for row in view_rows]
-        return sorted({row for row in source_rows if 0 <= row < len(self.jobs)})
+        return source_rows_from_view_rows_model(
+            view_rows,
+            source_row_for_view_row=self._queue_source_row_from_view_row,
+            job_count=len(self.jobs),
+        )
 
     def _selected_row(self) -> int:
         model = self.queue_table.selectionModel()
         rows = model.selectedRows() if model is not None else []
-        return self._queue_source_row_from_view_row(rows[0].row()) if rows else -1
+        return selected_row_from_view_rows_model(
+            [idx.row() for idx in rows if idx.isValid()],
+            source_row_for_view_row=self._queue_source_row_from_view_row,
+        )
 
     def _selected_rows(self) -> list[int]:
         model = self.queue_table.selectionModel()
@@ -2314,10 +2332,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _mixed_value(values: list[Any]) -> tuple[bool, Any]:
-        if not values:
-            return False, None
-        first = values[0]
-        return (any(value != first for value in values[1:]), first)
+        return mixed_value_model(values)
 
     def _effective_device_mode_for_job(self, job: RenderJob) -> DeviceOverrideMode:
         return job.effective_device_mode(self._default_device_mode())
@@ -4215,15 +4230,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._push_notification_item(message, severity, dedupe_consecutive=True)
 
     def _push_notification_item(self, message: str, severity: str, *, dedupe_consecutive: bool) -> bool:
-        text = str(message or "").strip()
-        if not text:
+        normalized = normalized_notification_model(message, severity)
+        signature = notification_signature_model(message, severity)
+        if not should_add_notification_model(
+            signature=signature,
+            last_signature=self._last_notification_signature,
+            dedupe_consecutive=dedupe_consecutive,
+        ):
             return False
+        assert normalized is not None
+        text, sev = normalized
         list_widget = getattr(self, "notifications_list", None)
         if list_widget is None:
-            return False
-        sev = str(severity or "info").lower()
-        signature = (text, sev)
-        if dedupe_consecutive and self._last_notification_signature == signature:
             return False
         item = QtWidgets.QListWidgetItem(text)
         item.setIcon(self._notification_icon_for_severity(sev))
@@ -4237,7 +4255,8 @@ class MainWindow(QtWidgets.QMainWindow):
         list_widget = getattr(self, "notifications_list", None)
         if list_widget is None:
             return
-        while list_widget.count() > max_items:
+        remove_count = trim_notification_count_model(count=list_widget.count(), max_items=max_items)
+        for _ in range(remove_count):
             list_widget.takeItem(0)
         if list_widget.count() > 0:
             list_widget.scrollToBottom()
@@ -4275,12 +4294,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _notification_color_for_severity(severity: str) -> QtGui.QColor:
-        sev = str(severity or "info").lower()
-        if sev == "error":
-            return QtGui.QColor("#d96b6b")
-        if sev == "warning":
-            return QtGui.QColor("#d4ad4a")
-        return QtGui.QColor("#d8d8d8")
+        return QtGui.QColor(notification_color_hex_model(severity))
 
     def _append_to_log_view_if_matches(self, source: str, text: str) -> None:
         source_filter = self.log_source_filter.currentText()
