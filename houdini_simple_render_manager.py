@@ -111,13 +111,19 @@ from queue_tree_ui import (
     refresh_queue_tree_model,
 )
 from queue_tree_sync import (
-    apply_hip_path_change as apply_hip_path_change_model,
-    apply_rop_path_change as apply_rop_path_change_model,
     propagate_hip_path_change as propagate_hip_path_change_model,
     propagate_rop_path_change as propagate_rop_path_change_model,
     refresh_jobs_from_rop_metadata as refresh_jobs_from_rop_metadata_model,
     sync_jobs_after_path_change as sync_jobs_after_path_change_model,
     validate_queue_path_value as validate_queue_path_value_model,
+)
+from queue_path_change_orchestration import (
+    affected_job_ids_for_hip_path_change as affected_job_ids_for_hip_path_change_model,
+    affected_job_ids_for_rop_path_change as affected_job_ids_for_rop_path_change_model,
+    apply_hip_path_change_immediately as apply_hip_path_change_immediately_model,
+    apply_rop_path_change_immediately as apply_rop_path_change_immediately_model,
+    defer_finalize_path_change as defer_finalize_path_change_model,
+    defer_reload_jobs_from_file as defer_reload_jobs_from_file_model,
 )
 from job_properties_actions import (
     JobPropertyEditSpec,
@@ -3030,17 +3036,15 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _apply_hip_path_change_immediately(self, old_hip: str, new_hip: str) -> list[str]:
-        changed_jobs = apply_hip_path_change_model(
+        return apply_hip_path_change_immediately_model(
             self.jobs,
             old_hip=old_hip,
             new_hip=new_hip,
             running_status=JobStatus.RUNNING,
         )
-        return [job.id for job in changed_jobs]
 
     def _affected_job_ids_for_hip_path_change(self, old_hip: str) -> list[str]:
-        old_key = str(old_hip or "").strip()
-        return [job.id for job in self.jobs if str(job.spec.hip_path or "").strip() == old_key]
+        return affected_job_ids_for_hip_path_change_model(self.jobs, old_hip)
 
     def _propagate_rop_path_change(self, hip_path: str, old_rop: str, new_rop: str) -> list[str]:
         return propagate_rop_path_change_model(
@@ -3056,23 +3060,16 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _apply_rop_path_change_immediately(self, hip_path: str, old_rop: str, new_rop: str) -> list[str]:
-        changed_jobs = apply_rop_path_change_model(
+        return apply_rop_path_change_immediately_model(
             self.jobs,
             hip_path=hip_path,
             old_rop=old_rop,
             new_rop=new_rop,
             running_status=JobStatus.RUNNING,
         )
-        return [job.id for job in changed_jobs]
 
     def _affected_job_ids_for_rop_path_change(self, hip_path: str, old_rop: str) -> list[str]:
-        hip_key = str(hip_path or "").strip()
-        old_key = str(old_rop or "").strip()
-        return [
-            job.id
-            for job in self.jobs
-            if str(job.spec.hip_path or "").strip() == hip_key and str(job.spec.rop_path or "").strip() == old_key
-        ]
+        return affected_job_ids_for_rop_path_change_model(self.jobs, hip_path, old_rop)
 
     def _refresh_jobs_from_rop_metadata(
         self,
@@ -3111,18 +3108,14 @@ class MainWindow(QtWidgets.QMainWindow):
         redo_select_job_ids: list[str],
         status_text: str,
     ) -> None:
-        ids = [job_id for job_id in changed_ids if job_id]
-        if not ids:
-            return
-        self._begin_path_sync_lock(ids)
-        self._enqueue_path_sync_task(
-            {
-                "ids": ids,
-                "before_states": list(before_states),
-                "undo_select_job_ids": list(undo_select_job_ids),
-                "redo_select_job_ids": list(redo_select_job_ids),
-                "status_text": status_text,
-            }
+        defer_finalize_path_change_model(
+            changed_ids=changed_ids,
+            before_states=before_states,
+            undo_select_job_ids=undo_select_job_ids,
+            redo_select_job_ids=redo_select_job_ids,
+            status_text=status_text,
+            begin_path_sync_lock=self._begin_path_sync_lock,
+            enqueue_path_sync_task=self._enqueue_path_sync_task,
         )
 
     def _defer_reload_jobs_from_file(
@@ -3133,21 +3126,14 @@ class MainWindow(QtWidgets.QMainWindow):
         status_text: str,
         notification_label: str,
     ) -> None:
-        ids = [job.id for job in target_jobs if job is not None and str(job.id or "").strip()]
-        if not ids:
-            return
-        before_states = self._job_states_for_ids(ids)
-        self._begin_path_sync_lock(ids)
-        self._enqueue_path_sync_task(
-            {
-                "ids": ids,
-                "before_states": before_states,
-                "undo_select_job_ids": ids,
-                "redo_select_job_ids": ids,
-                "status_text": status_text,
-                "reset_override_to_rop": reset_override_to_rop,
-                "notification_label": notification_label,
-            }
+        defer_reload_jobs_from_file_model(
+            target_jobs,
+            reset_override_to_rop=reset_override_to_rop,
+            status_text=status_text,
+            notification_label=notification_label,
+            job_states_for_ids=self._job_states_for_ids,
+            begin_path_sync_lock=self._begin_path_sync_lock,
+            enqueue_path_sync_task=self._enqueue_path_sync_task,
         )
 
     def _on_queue_tree_item_changed(self, item: QtGui.QStandardItem) -> None:
