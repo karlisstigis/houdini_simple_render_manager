@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from preview_paths import resolve_job_preview_path
+from app_core.preview_paths import resolve_job_preview_path
 
 
 class PreviewPathsTests(unittest.TestCase):

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6 import QtCore
 
-from worker_client import ScanWorkerClient
+from worker_core.worker_client import ScanWorkerClient
 
 
 class _TimeoutScanWorkerClient(ScanWorkerClient):

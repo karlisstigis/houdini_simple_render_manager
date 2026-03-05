@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from log_panel_actions import (
+from app_core.log_panel_actions import (
     delete_log_files,
     discover_log_files,
     log_deletion_feedback,

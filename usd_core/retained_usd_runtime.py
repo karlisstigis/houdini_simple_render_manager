@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from atomic_io import write_json_atomic
+from app_core.atomic_io import write_json_atomic
 from queue_core.queue_models import JobStatus, RenderJob
 
 

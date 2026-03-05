@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from job_properties_presenter import (
+from job_core.job_properties_presenter import (
     has_active_or_locked_jobs,
     selected_jobs_editable,
     selected_jobs_summary,

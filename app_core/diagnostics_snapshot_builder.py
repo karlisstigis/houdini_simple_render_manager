@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from diagnostics import DiagnosticsSnapshot
+from app_core.diagnostics import DiagnosticsSnapshot
 
 
 def build_diagnostics_snapshot(

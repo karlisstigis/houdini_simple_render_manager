@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from job_validation import (
+from app_core.job_validation import (
     validate_log_file_deletion,
     validate_logs_folder_access,
     validate_output_folder_open,

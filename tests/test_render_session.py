@@ -8,7 +8,7 @@ from pathlib import Path
 from PySide6 import QtCore
 
 from queue_core.queue_models import DeviceOverrideMode, RenderJob
-from render_session import RenderSessionController, RenderSessionHooks
+from render_core.render_session import RenderSessionController, RenderSessionHooks
 
 
 class RenderSessionTests(unittest.TestCase):

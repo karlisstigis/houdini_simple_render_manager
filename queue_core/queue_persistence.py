@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from atomic_io import read_json_file, write_json_atomic
+from app_core.atomic_io import read_json_file, write_json_atomic
 from queue_core.queue_models import DeviceOverrideMode, FrameHandlingMode, JobStatus, RenderJob, UsdOutputDirectoryMode
 
 

@@ -11,11 +11,11 @@ from PySide6 import QtCore
 from queue_core.queue_execution import apply_render_finished_state as apply_render_finished_state_model
 from queue_core.queue_execution import retry_current_chunk as retry_current_chunk_model
 from queue_core.queue_models import JobStatus, RenderJob
-from render_output_parser import (
+from render_core.render_output_parser import (
     update_job_from_hsrm_markers as update_job_from_hsrm_markers_model,
     update_job_runtime_flags_from_output as update_job_runtime_flags_from_output_model,
 )
-from render_runner import build_render_command_plan
+from render_core.render_runner import build_render_command_plan
 
 
 @dataclass

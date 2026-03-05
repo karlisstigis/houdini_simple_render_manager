@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from action_policy import (
+from app_core.action_policy import (
     can_duplicate_jobs,
     can_edit_job,
     can_edit_job_column,

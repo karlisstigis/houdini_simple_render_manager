@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from queue_core.queue_editing import apply_queue_path_text
 from queue_core.queue_models import RenderJob
-from rop_metadata import RopInfo, apply_rop_info_to_job as apply_rop_info_to_job_model
+from houdini_core.rop_metadata import RopInfo, apply_rop_info_to_job as apply_rop_info_to_job_model
 
 
 def validate_queue_path_value(column: int, text: str) -> str:

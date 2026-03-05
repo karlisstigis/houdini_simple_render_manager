@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from notification_list_state import (
+from app_core.notification_list_state import (
     normalized_notification,
     notification_signature,
     should_add_notification,
 )
-from notification_rules import notification_messages_for_log
+from app_core.notification_rules import notification_messages_for_log
 
 
 NotificationEntry = tuple[str, str]

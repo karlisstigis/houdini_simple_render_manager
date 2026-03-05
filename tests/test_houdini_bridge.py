@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from houdini_bridge import ensure_husk_hook_files
+from houdini_core.houdini_bridge import ensure_husk_hook_files
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

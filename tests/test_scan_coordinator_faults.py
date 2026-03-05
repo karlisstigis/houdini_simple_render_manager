@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from queue_core.queue_models import RenderJob
-from scan_coordinator import ScanCoordinator, ScanCoordinatorHooks
+from houdini_core.scan_coordinator import ScanCoordinator, ScanCoordinatorHooks
 
 
 class ScanCoordinatorFaultTests(unittest.TestCase):

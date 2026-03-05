@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from houdini_bridge import (
+from houdini_core.houdini_bridge import (
     REQUIRED_HOUDINI_SCRIPT_FILENAMES,
     build_render_preflight_script as build_render_preflight_script_bridge,
     ensure_husk_hook_files as ensure_husk_hook_files_bridge,
@@ -15,7 +15,7 @@ from houdini_bridge import (
     project_houdini_scripts_dir as project_houdini_scripts_dir_bridge,
     validate_houdini_script_files as validate_houdini_script_files_bridge,
 )
-from rop_metadata import (
+from houdini_core.rop_metadata import (
     RopInfo,
     apply_rop_info_to_job as apply_rop_info_to_job_model,
     parse_probe_rop_info_output,

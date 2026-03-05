@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from action_policy import can_start_queue
+from app_core.action_policy import can_start_queue
 from queue_core.queue_execution import select_next_runnable_job
 from queue_core.queue_models import JobStatus
 

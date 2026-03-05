@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from job_properties_state import (
+from job_core.job_properties_state import (
     build_job_properties_panel_state,
     default_job_properties_panel_state,
     mixed_or_value_text,

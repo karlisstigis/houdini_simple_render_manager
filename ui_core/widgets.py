@@ -8,7 +8,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from queue_core.queue_models import DeviceOverrideMode, UsdOutputDirectoryMode
 from queue_core.queue_table_model import PATH_SYNC_LOCKED_ROLE, QueueTableModel
-from theme_support import DEFAULT_THEME
+from ui_core.theme_support import DEFAULT_THEME
 
 
 class CleanStepSpinBox(QtWidgets.QSpinBox):

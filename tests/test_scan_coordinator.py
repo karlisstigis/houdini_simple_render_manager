@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 
 from queue_core.queue_models import RenderJob
-from rop_metadata import RopInfo
-from scan_coordinator import ScanCoordinator, ScanCoordinatorHooks
+from houdini_core.rop_metadata import RopInfo
+from houdini_core.scan_coordinator import ScanCoordinator, ScanCoordinatorHooks
 
 
 class ScanCoordinatorTests(unittest.TestCase):

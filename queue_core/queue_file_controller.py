@@ -6,7 +6,7 @@ from typing import Callable
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from action_policy import can_open_queue_file
+from app_core.action_policy import can_open_queue_file
 
 
 @dataclass

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from diagnostics_snapshot_builder import build_diagnostics_snapshot
+from app_core.diagnostics_snapshot_builder import build_diagnostics_snapshot
 
 
 class DiagnosticsSnapshotBuilderTests(unittest.TestCase):

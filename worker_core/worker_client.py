@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from PySide6 import QtCore
 
-from worker_protocol import MessageBuffer, encode_message
+from worker_core.worker_protocol import MessageBuffer, encode_message
 
 
 @dataclass

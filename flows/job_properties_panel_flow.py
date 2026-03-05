@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from job_properties_presenter import (
+from job_core.job_properties_presenter import (
     has_active_or_locked_jobs,
     selected_jobs_editable,
     selected_jobs_summary,
     should_show_custom_devices,
 )
-from job_properties_state import build_job_properties_panel_state
+from job_core.job_properties_state import build_job_properties_panel_state
 from queue_core.queue_models import RenderJob
 from usd_core.retained_usd_panel_state import can_delete_retained_usd, multi_job_retained_usd_panel_state
 

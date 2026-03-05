@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from notification_coordinator import (
+from app_core.notification_coordinator import (
     appendable_notifications,
     appendable_notifications_for_log,
 )

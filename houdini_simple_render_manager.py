@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from PySide6 import QtCore, QtGui, QtWidgets
-from action_policy import (
+from app_core.action_policy import (
     can_duplicate_jobs,
     can_edit_job,
     can_edit_job_column,
@@ -30,10 +30,10 @@ from flows.app_preferences_flow import (
     dialog_runtime_defaults as dialog_runtime_defaults_model,
     parse_preferences_payload as parse_preferences_payload_model,
 )
-from atomic_io import read_json_file, write_json_atomic
-from diagnostics import DiagnosticsSnapshot, build_diagnostics_report
-from diagnostics_snapshot_builder import build_diagnostics_snapshot as build_diagnostics_snapshot_model
-from houdini_service import (
+from app_core.atomic_io import read_json_file, write_json_atomic
+from app_core.diagnostics import DiagnosticsSnapshot, build_diagnostics_report
+from app_core.diagnostics_snapshot_builder import build_diagnostics_snapshot as build_diagnostics_snapshot_model
+from houdini_core.houdini_service import (
     build_render_preflight_script as build_render_preflight_script_model,
     ensure_husk_hook_files as ensure_husk_hook_files_model,
     load_houdini_script_text as load_houdini_script_text_model,
@@ -41,7 +41,7 @@ from houdini_service import (
     required_houdini_script_filenames as required_houdini_script_filenames_model,
     validate_houdini_script_files as validate_houdini_script_files_model,
 )
-from job_validation import (
+from app_core.job_validation import (
     validate_log_file_deletion,
     validate_logs_folder_access,
     validate_output_folder_open,
@@ -76,7 +76,7 @@ from queue_core.queue_execution import (
     advance_job_to_next_chunk as advance_job_to_next_chunk_model,
     retry_current_chunk as retry_current_chunk_model,
 )
-from log_panel_actions import (
+from app_core.log_panel_actions import (
     delete_log_files as delete_log_files_model,
     discover_log_files as discover_log_files_model,
     log_deletion_feedback as log_deletion_feedback_model,
@@ -146,7 +146,7 @@ from flows.queue_context_menu_flow import (
     build_queue_context_menu_availability as build_queue_context_menu_availability_model,
     queue_context_action_key as queue_context_action_key_model,
 )
-from preview_paths import resolve_job_preview_path as resolve_job_preview_path_model
+from app_core.preview_paths import resolve_job_preview_path as resolve_job_preview_path_model
 from queue_core.queue_frame_scan import (
     first_missing_frame_and_contiguous_done as first_missing_frame_and_contiguous_done_model,
     missing_frame_runs_and_existing_count as missing_frame_runs_and_existing_count_model,
@@ -189,7 +189,7 @@ from queue_core.queue_path_change_orchestration import (
     defer_finalize_path_change as defer_finalize_path_change_model,
     defer_reload_jobs_from_file as defer_reload_jobs_from_file_model,
 )
-from job_properties_actions import (
+from job_core.job_properties_actions import (
     JobPropertyEditSpec,
     device_mode_edit_spec as device_mode_edit_spec_model,
     device_selection_edit_spec as device_selection_edit_spec_model,
@@ -199,19 +199,19 @@ from job_properties_actions import (
     usd_output_directory_custom_path_edit_spec as usd_output_directory_custom_path_edit_spec_model,
     usd_output_directory_mode_edit_spec as usd_output_directory_mode_edit_spec_model,
 )
-from job_properties_state import (
+from job_core.job_properties_state import (
     default_job_properties_panel_state as default_job_properties_panel_state_model,
 )
 from flows.job_properties_panel_flow import (
     build_job_properties_state_for_selection as build_job_properties_state_for_selection_model,
 )
-from render_session import RenderSessionController, RenderSessionHooks
-from recovery_reporting import build_startup_recovery_summary
-from scan_coordinator import ScanCoordinator, ScanCoordinatorHooks
-from render_output_parser import (
+from render_core.render_session import RenderSessionController, RenderSessionHooks
+from app_core.recovery_reporting import build_startup_recovery_summary
+from houdini_core.scan_coordinator import ScanCoordinator, ScanCoordinatorHooks
+from render_core.render_output_parser import (
     detect_phase_from_output_with_job as detect_phase_from_output_with_job_model,
 )
-from rop_metadata import (
+from houdini_core.rop_metadata import (
     RopInfo,
     apply_rop_info_to_job as apply_rop_info_to_job_model,
 )
@@ -241,16 +241,16 @@ from usd_core.retained_usd_actions import (
     delete_retained_usd_directories as delete_retained_usd_directories_model,
     first_retained_usd_folder as first_retained_usd_folder_model,
 )
-from notification_rules import (
+from app_core.notification_rules import (
     classified_render_error_notification as classified_render_error_notification_model,
     notification_messages_for_log as notification_messages_for_log_model,
     notification_summary_for_line as notification_summary_for_line_model,
 )
-from notification_coordinator import (
+from app_core.notification_coordinator import (
     appendable_notifications as appendable_notifications_model,
     appendable_notifications_for_log as appendable_notifications_for_log_model,
 )
-from notification_list_state import (
+from app_core.notification_list_state import (
     notification_color_hex as notification_color_hex_model,
     trim_notification_count as trim_notification_count_model,
 )
@@ -305,7 +305,7 @@ from flows.queue_state_io import (
     load_queue_state as load_queue_state_model,
     save_queue_state as save_queue_state_model,
 )
-from render_environment_builder import (
+from render_core.render_environment_builder import (
     apply_device_env as apply_device_env_model,
     apply_retained_usd_env as apply_retained_usd_env_model,
     available_gpu_ids as available_gpu_ids_model,
@@ -316,9 +316,9 @@ from render_environment_builder import (
 )
 from ui_core.ui_state_rules import build_ui_state as build_ui_state_model
 from queue_core.queue_undo_redo import pop_history_for_shortcut as pop_history_for_shortcut_model
-from theme_support import DEFAULT_THEME, build_app_stylesheet, ensure_theme_icons, normalize_theme_colors
+from ui_core.theme_support import DEFAULT_THEME, build_app_stylesheet, ensure_theme_icons, normalize_theme_colors
 from ui_core.widgets import AddJobPanel, CleanStepSpinBox, JobPropertiesPanel, PanelFrame, PreferencesDialog, QueueTableItemDelegate, QueueTableWidget, RopListWidget
-from worker_client import RenderWorkerClient, ScanWorkerClient
+from worker_core.worker_client import RenderWorkerClient, ScanWorkerClient
 
 
 APP_NAME = "Houdini Simple Render Manager"

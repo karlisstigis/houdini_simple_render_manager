@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from atomic_io import read_json_file, write_json_atomic
-from worker_protocol import decode_message, encode_message
+from app_core.atomic_io import read_json_file, write_json_atomic
+from worker_core.worker_protocol import decode_message, encode_message
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

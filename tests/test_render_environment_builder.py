@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from queue_core.queue_models import DeviceOverrideMode
-from render_environment_builder import (
+from render_core.render_environment_builder import (
     apply_device_env,
     apply_retained_usd_env,
     available_gpu_ids,

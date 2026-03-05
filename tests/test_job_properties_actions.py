@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from job_properties_actions import (
+from job_core.job_properties_actions import (
     device_mode_edit_spec,
     device_selection_edit_spec,
     retain_built_usd_edit_spec,

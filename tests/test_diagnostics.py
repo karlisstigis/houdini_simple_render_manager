@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from diagnostics import DiagnosticsSnapshot, build_diagnostics_report
+from app_core.diagnostics import DiagnosticsSnapshot, build_diagnostics_report
 
 
 class DiagnosticsTests(unittest.TestCase):

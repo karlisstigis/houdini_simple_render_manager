@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from notification_list_state import (
+from app_core.notification_list_state import (
     normalized_notification,
     notification_color_hex,
     notification_signature,
