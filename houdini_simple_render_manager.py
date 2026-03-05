@@ -200,9 +200,9 @@ from job_properties_actions import (
     usd_output_directory_mode_edit_spec as usd_output_directory_mode_edit_spec_model,
 )
 from job_properties_state import (
-    build_job_properties_panel_state as build_job_properties_panel_state_model,
     default_job_properties_panel_state as default_job_properties_panel_state_model,
 )
+from job_properties_panel_flow import build_job_properties_state_for_selection as build_job_properties_state_for_selection_model
 from render_session import RenderSessionController, RenderSessionHooks
 from recovery_reporting import build_startup_recovery_summary
 from scan_coordinator import ScanCoordinator, ScanCoordinatorHooks
@@ -231,8 +231,6 @@ from retained_usd_runtime import (
     write_retained_usd_metadata as write_retained_usd_metadata_model,
 )
 from retained_usd_panel_state import (
-    can_delete_retained_usd as can_delete_retained_usd_model,
-    multi_job_retained_usd_panel_state as multi_job_retained_usd_panel_state_model,
     retained_usd_panel_default_fields as retained_usd_panel_default_fields_model,
     single_job_retained_usd_panel_state as single_job_retained_usd_panel_state_model,
 )
@@ -313,12 +311,6 @@ from render_environment_builder import (
     parse_device_selection as parse_device_selection_model,
     should_delete_existing_retained_usd as should_delete_existing_retained_usd_model,
     should_reuse_existing_usd as should_reuse_existing_usd_model,
-)
-from job_properties_presenter import (
-    has_active_or_locked_jobs as has_active_or_locked_jobs_model,
-    selected_jobs_editable as selected_jobs_editable_model,
-    selected_jobs_summary as selected_jobs_summary_model,
-    should_show_custom_devices as should_show_custom_devices_model,
 )
 from ui_state_rules import build_ui_state as build_ui_state_model
 from queue_undo_redo import pop_history_for_shortcut as pop_history_for_shortcut_model
@@ -2669,76 +2661,27 @@ class MainWindow(QtWidgets.QMainWindow):
         checked_state = int(getattr(QtCore.Qt.CheckState.Checked, "value", QtCore.Qt.CheckState.Checked))
         partial_state = int(getattr(QtCore.Qt.CheckState.PartiallyChecked, "value", QtCore.Qt.CheckState.PartiallyChecked))
         selected_jobs = self._selected_jobs()
-        if not selected_jobs:
-            panel.set_state(self._job_properties_panel_default_state())
-            return
-
-        summary = selected_jobs_summary_model(
-            selected_jobs,
-            mixed_value=self._mixed_value,
-            job_file_name=self._job_file_name,
-            job_rop_name=self._job_rop_name,
-        )
-        retained_usd_state: dict[str, Any]
-        retained_paths: list[Path] = []
-        if summary["selected_count"] == 1:
-            retained_usd_state = self._single_job_retained_usd_panel_state(selected_jobs[0])
-        else:
-            retained_paths = self._selected_retained_usd_paths()
-            retained_usd_state = multi_job_retained_usd_panel_state_model(retained_paths)
-
-        editable = selected_jobs_editable_model(
-            selected_jobs,
-            can_edit_job=lambda job: can_edit_job(
-                job,
-                is_active_job=self._is_active_job(job),
-                is_locked=self._is_job_path_sync_locked(job),
-            ).allowed,
-        )
-        show_custom_devices = should_show_custom_devices_model(
-            mixed_device_mode=bool(summary["mixed_device_mode"]),
-            first_device_mode=str(summary["first_device_mode"] or ""),
-        )
-        can_delete = can_delete_retained_usd_model(
-            selected_count=int(summary["selected_count"]),
-            retained_state_can_open=bool(retained_usd_state["can_open"]),
-            retained_paths_present=bool(retained_paths),
-            has_active_or_locked_job=has_active_or_locked_jobs_model(
-                selected_jobs,
-                is_active_job=self._is_active_job,
-                is_locked_job=self._is_job_path_sync_locked,
-            ),
-        )
-
         panel.set_state(
-            build_job_properties_panel_state_model(
-                mixed_name=bool(summary["mixed_name"]),
-                first_name=summary["first_name"],
-                mixed_file=bool(summary["mixed_file"]),
-                first_file=summary["first_file"],
-                mixed_rop=bool(summary["mixed_rop"]),
-                first_rop=summary["first_rop"],
-                editable=editable,
-                mixed_device_mode=bool(summary["mixed_device_mode"]),
-                first_device_mode=str(summary["first_device_mode"] or ""),
-                show_custom_devices=show_custom_devices,
-                device_options=self._device_option_states_for_jobs(
-                    selected_jobs,
+            build_job_properties_state_for_selection_model(
+                selected_jobs=selected_jobs,
+                panel_default_state=self._job_properties_panel_default_state,
+                mixed_value=self._mixed_value,
+                job_file_name=self._job_file_name,
+                job_rop_name=self._job_rop_name,
+                single_job_retained_state=self._single_job_retained_usd_panel_state,
+                selected_retained_paths=self._selected_retained_usd_paths,
+                can_edit_job_for_panel=lambda job: can_edit_job(
+                    job,
+                    is_active_job=self._is_active_job(job),
+                    is_locked=self._is_job_path_sync_locked(job),
+                ).allowed,
+                device_option_states_for_jobs=lambda jobs, show_custom_devices, editable: self._device_option_states_for_jobs(
+                    jobs,
                     show_custom_devices=show_custom_devices,
                     editable=editable,
                 ),
-                mixed_single_process=bool(summary["mixed_single_process"]),
-                first_single_process=bool(summary["first_single_process"]),
-                mixed_retain=bool(summary["mixed_retain"]),
-                first_retain=bool(summary["first_retain"]),
-                mixed_reuse=bool(summary["mixed_reuse"]),
-                first_reuse=bool(summary["first_reuse"]),
-                mixed_usd_output_mode=bool(summary["mixed_usd_output_mode"]),
-                first_usd_output_mode=str(summary["first_usd_output_mode"] or ""),
-                mixed_usd_output_custom_path=bool(summary["mixed_usd_output_custom_path"]),
-                first_usd_output_custom_path=str(summary["first_usd_output_custom_path"] or ""),
-                retained_usd_state=retained_usd_state,
-                can_delete=can_delete,
+                is_active_job=self._is_active_job,
+                is_locked_job=self._is_job_path_sync_locked,
                 unchecked_state=unchecked_state,
                 checked_state=checked_state,
                 partial_state=partial_state,
