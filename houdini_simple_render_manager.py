@@ -278,6 +278,10 @@ from queue_output_probe import (
     needs_pattern_refresh as needs_pattern_refresh_model,
     path_exists_nonempty as path_exists_nonempty_model,
 )
+from queue_output_resolution_flow import (
+    maybe_refresh_probe_path as maybe_refresh_probe_path_model,
+    probe_pattern_resolved as probe_pattern_resolved_model,
+)
 from queue_refresh_selection import (
     clamped_select_row as clamped_select_row_model,
     preserved_selection as preserved_selection_model,
@@ -3605,37 +3609,37 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # If we only have a folder (or an unpatterned path), refresh metadata from the ROP first.
         # This often gives us a resolved sample filename path without needing to start the render.
-        needs_pattern_refresh = needs_pattern_refresh_model(
+        probe_path, node_not_found = maybe_refresh_probe_path_model(
             probe_path=probe_path,
             sample_file_path=sample_file_path,
             start_frame=start_frame,
-            frame_path_for_frame=self._frame_sequence_path_for_frame,
+            hip_exists=Path(job.spec.hip_path).exists(),
+            hbatch_exists=self._hbatch_exists(),
+            hip_path=job.spec.hip_path,
+            rop_path=job.spec.rop_path,
+            needs_pattern_refresh_fn=needs_pattern_refresh_model,
+            frame_path_for_frame_fn=self._frame_sequence_path_for_frame,
+            probe_rop_info_fn=self._probe_rop_info,
+            apply_rop_info_fn=lambda info: apply_rop_info_to_job_model(
+                job,
+                info,
+                self._normalize_output_display_path,
+                apply_runtime_range=False,
+            ),
+            refreshed_sample_path_fn=lambda: str(job.view.out_file_sample_path or ""),
         )
-        if needs_pattern_refresh and Path(job.spec.hip_path).exists() and self._hbatch_exists():
-            info = self._probe_rop_info(job.spec.hip_path, job.spec.rop_path)
-            if info is None:
-                info = None
-            if info is not None and info.error == "node_not_found":
-                self._mark_job_offline(job, "ROP node not found in HIP file.")
-                self._save_and_refresh_queue(select_job_id=job.id)
-                return None
-            if info is not None:
-                # For resume pre-check, refresh only output/strict metadata; do not mutate
-                # the displayed frame range/step values in the queue.
-                apply_rop_info_to_job_model(
-                    job,
-                    info,
-                    self._normalize_output_display_path,
-                    apply_runtime_range=False,
-                )
-            refreshed_sample = (job.view.out_file_sample_path or "").strip()
-            if refreshed_sample:
-                probe_path = refreshed_sample
-                sample_file_path = refreshed_sample
+        if node_not_found:
+            self._mark_job_offline(job, "ROP node not found in HIP file.")
+            self._save_and_refresh_queue(select_job_id=job.id)
+            return None
 
         probe_decision = validate_resume_probe_path(
             probe_path=probe_path,
-            pattern_resolved=self._frame_sequence_path_for_frame(probe_path, start_frame) is not None,
+            pattern_resolved=probe_pattern_resolved_model(
+                probe_path=probe_path,
+                start_frame=start_frame,
+                frame_path_for_frame_fn=self._frame_sequence_path_for_frame,
+            ),
         )
         if not probe_decision.valid:
             if interactive and probe_decision.title:
@@ -3686,32 +3690,37 @@ class MainWindow(QtWidgets.QMainWindow):
         sample_file_path = (job.view.out_file_sample_path or "").strip()
         out_path = (job.view.out_path or "").strip()
         probe_path = initial_probe_path_model(sample_file_path, out_path)
-        needs_pattern_refresh = needs_pattern_refresh_model(
+        probe_path, node_not_found = maybe_refresh_probe_path_model(
             probe_path=probe_path,
             sample_file_path=sample_file_path,
             start_frame=start_frame,
-            frame_path_for_frame=self._frame_sequence_path_for_frame,
+            hip_exists=Path(job.spec.hip_path).exists(),
+            hbatch_exists=self._hbatch_exists(),
+            hip_path=job.spec.hip_path,
+            rop_path=job.spec.rop_path,
+            needs_pattern_refresh_fn=needs_pattern_refresh_model,
+            frame_path_for_frame_fn=self._frame_sequence_path_for_frame,
+            probe_rop_info_fn=self._probe_rop_info,
+            apply_rop_info_fn=lambda info: apply_rop_info_to_job_model(
+                job,
+                info,
+                self._normalize_output_display_path,
+                apply_runtime_range=False,
+            ),
+            refreshed_sample_path_fn=lambda: str(job.view.out_file_sample_path or ""),
         )
-        if needs_pattern_refresh and Path(job.spec.hip_path).exists() and self._hbatch_exists():
-            info = self._probe_rop_info(job.spec.hip_path, job.spec.rop_path)
-            if info is not None and info.error == "node_not_found":
-                self._mark_job_offline(job, "ROP node not found in HIP file.")
-                self._save_and_refresh_queue(select_job_id=job.id)
-                return None
-            if info is not None:
-                apply_rop_info_to_job_model(
-                    job,
-                    info,
-                    self._normalize_output_display_path,
-                    apply_runtime_range=False,
-                )
-            refreshed_sample = (job.view.out_file_sample_path or "").strip()
-            if refreshed_sample:
-                probe_path = refreshed_sample
+        if node_not_found:
+            self._mark_job_offline(job, "ROP node not found in HIP file.")
+            self._save_and_refresh_queue(select_job_id=job.id)
+            return None
 
         probe_decision = validate_render_missing_probe_path(
             probe_path=probe_path,
-            pattern_resolved=self._frame_sequence_path_for_frame(probe_path, start_frame) is not None,
+            pattern_resolved=probe_pattern_resolved_model(
+                probe_path=probe_path,
+                start_frame=start_frame,
+                frame_path_for_frame_fn=self._frame_sequence_path_for_frame,
+            ),
         )
         if not probe_decision.valid:
             if interactive and probe_decision.title:
