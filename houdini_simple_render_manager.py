@@ -235,11 +235,12 @@ from notification_rules import (
     notification_messages_for_log as notification_messages_for_log_model,
     notification_summary_for_line as notification_summary_for_line_model,
 )
+from notification_coordinator import (
+    appendable_notifications as appendable_notifications_model,
+    appendable_notifications_for_log as appendable_notifications_for_log_model,
+)
 from notification_list_state import (
-    normalized_notification as normalized_notification_model,
     notification_color_hex as notification_color_hex_model,
-    notification_signature as notification_signature_model,
-    should_add_notification as should_add_notification_model,
     trim_notification_count as trim_notification_count_model,
 )
 from queue_selection_helpers import (
@@ -4241,27 +4242,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self._append_notifications(source, text)
 
     def _append_notification_message(self, message: str, severity: str = "info") -> None:
-        self._push_notification_item(message, severity, dedupe_consecutive=True)
-
-    def _push_notification_item(self, message: str, severity: str, *, dedupe_consecutive: bool) -> bool:
-        normalized = normalized_notification_model(message, severity)
-        signature = notification_signature_model(message, severity)
-        if not should_add_notification_model(
-            signature=signature,
+        entries, next_signature = appendable_notifications_model(
+            candidates=[(message, severity)],
             last_signature=self._last_notification_signature,
-            dedupe_consecutive=dedupe_consecutive,
-        ):
+            dedupe_consecutive=True,
+        )
+        self._append_notification_entries(entries, next_signature=next_signature)
+
+    def _append_notification_entries(
+        self,
+        entries: list[tuple[str, str]],
+        *,
+        next_signature: tuple[str, str] | None,
+    ) -> bool:
+        if not entries:
             return False
-        assert normalized is not None
-        text, sev = normalized
         list_widget = getattr(self, "notifications_list", None)
         if list_widget is None:
             return False
-        item = QtWidgets.QListWidgetItem(text)
-        item.setIcon(self._notification_icon_for_severity(sev))
-        item.setForeground(QtGui.QBrush(self._notification_color_for_severity(sev)))
-        list_widget.addItem(item)
-        self._last_notification_signature = signature
+        for text, sev in entries:
+            item = QtWidgets.QListWidgetItem(text)
+            item.setIcon(self._notification_icon_for_severity(sev))
+            item.setForeground(QtGui.QBrush(self._notification_color_for_severity(sev)))
+            list_widget.addItem(item)
+        self._last_notification_signature = next_signature
         self._trim_notifications_list(max_items=250)
         return True
 
@@ -4276,15 +4280,13 @@ class MainWindow(QtWidgets.QMainWindow):
             list_widget.scrollToBottom()
 
     def _append_notifications(self, source: str, text: str) -> None:
-        list_widget = getattr(self, "notifications_list", None)
-        if list_widget is None:
-            return
-        added = False
-        for message, severity in self._notification_messages_for_log(source, text):
-            if self._push_notification_item(message, severity, dedupe_consecutive=True):
-                added = True
-        if not added:
-            return
+        entries, next_signature = appendable_notifications_for_log_model(
+            source=source,
+            text=text,
+            last_signature=self._last_notification_signature,
+            dedupe_consecutive=True,
+        )
+        self._append_notification_entries(entries, next_signature=next_signature)
 
     def _notification_messages_for_log(self, source: str, text: str) -> list[tuple[str, str]]:
         return notification_messages_for_log_model(source, text)
