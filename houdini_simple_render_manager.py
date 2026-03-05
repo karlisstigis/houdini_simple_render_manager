@@ -293,6 +293,14 @@ from queue_start_control import (
     should_set_selected_rerun_status as should_set_selected_rerun_status_model,
     start_queue_runnable_state as start_queue_runnable_state_model,
 )
+from queue_start_flow import (
+    evaluate_job_start_preflight as evaluate_job_start_preflight_model,
+    start_queue_mode as start_queue_mode_model,
+)
+from queue_state_io import (
+    load_queue_state as load_queue_state_model,
+    save_queue_state as save_queue_state_model,
+)
 from render_environment_builder import (
     apply_device_env as apply_device_env_model,
     apply_retained_usd_env as apply_retained_usd_env_model,
@@ -1966,18 +1974,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _load_queue_from_path(self, path: Path) -> bool:
         try:
-            raw = load_queue_payload(path)
-            jobs_data = raw.get("jobs", [])
-            queue_view = raw.get("queue_view", {})
-            active_job_id = str(raw.get("active_job_id", "") or "").strip()
-            loaded_jobs: list[RenderJob] = []
-            if isinstance(jobs_data, list):
-                for item in jobs_data:
-                    if not isinstance(item, dict):
-                        continue
-                    job = self._job_from_persisted_dict(item, active_job_id=active_job_id)
-                    if job is not None:
-                        loaded_jobs.append(job)
+            loaded_jobs, queue_view, active_job_id = load_queue_state_model(
+                path,
+                load_queue_payload_fn=load_queue_payload,
+                job_from_persisted_dict_fn=lambda item, active_id: self._job_from_persisted_dict(
+                    item,
+                    active_job_id=active_id,
+                ),
+            )
             self.jobs = loaded_jobs
             self._set_current_queue_file_path(path)
             self._reset_queue_view_to_defaults()
@@ -3838,13 +3842,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _save_queue_state(self, path: Path | None = None) -> bool:
         try:
-            target_path = path or self._current_queue_file_path()
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            save_queue_payload(
-                target_path,
+            target_path = save_queue_state_model(
+                current_queue_path=self._current_queue_file_path(),
+                path_override=path,
                 jobs=self.jobs,
                 queue_view=self._queue_view_to_persisted_dict(),
                 active_job_id=self.current_job_id,
+                save_queue_payload_fn=save_queue_payload,
             )
             self._set_current_queue_file_path(target_path)
             return True
@@ -4651,15 +4655,22 @@ class MainWindow(QtWidgets.QMainWindow):
             has_runnable=has_runnable,
             can_start_selected=can_start_selected,
         )
-        if self.queue_active:
-            if self.queue_paused and start_decision.resume_existing:
-                self._apply_queue_lifecycle_state(with_queue_resumed_model(self._queue_lifecycle_state()))
-                self._append_log("Stdout", "\n[Queue] Resumed\n")
-                self._set_status_message("Queue resumed", 3000)
-                self._maybe_start_next_job()
-                self._refresh_ui_state()
+        mode = start_queue_mode_model(
+            queue_active=bool(self.queue_active),
+            queue_paused=bool(self.queue_paused),
+            resume_existing=bool(start_decision.resume_existing),
+            allowed=bool(start_decision.allowed),
+        )
+        if mode == "already_active":
             return
-        if not bool(start_decision.allowed):
+        if mode == "resume_existing":
+            self._apply_queue_lifecycle_state(with_queue_resumed_model(self._queue_lifecycle_state()))
+            self._append_log("Stdout", "\n[Queue] Resumed\n")
+            self._set_status_message("Queue resumed", 3000)
+            self._maybe_start_next_job()
+            self._refresh_ui_state()
+            return
+        if mode == "blocked":
             reason = str(start_decision.reason or "")
             title = blocked_start_title_model(reason)
             safe_message(self, title, reason)
@@ -4732,12 +4743,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._start_job(decision.job)
 
     def _start_job(self, job: RenderJob) -> None:
-        if not self._hbatch_exists():
-            safe_message(self, "hbatch Missing", "Configured hbatch.exe no longer exists.")
-            self._finish_queue("Queue aborted")
-            return
-        if not Path(job.spec.hip_path).exists():
-            self._mark_job_offline(job, "HIP file not found.")
+        preflight = evaluate_job_start_preflight_model(
+            hbatch_exists=self._hbatch_exists(),
+            hip_exists=Path(job.spec.hip_path).exists(),
+        )
+        if not preflight.allowed:
+            if preflight.dialog_title and preflight.dialog_message:
+                safe_message(self, preflight.dialog_title, preflight.dialog_message)
+            if preflight.abort_queue:
+                self._finish_queue("Queue aborted")
+                return
+            if preflight.offline_reason:
+                self._mark_job_offline(job, preflight.offline_reason)
             self._save_queue_state()
             self._refresh_queue_table(select_job_id=job.id)
             self._maybe_start_next_job()
