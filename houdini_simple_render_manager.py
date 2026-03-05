@@ -102,6 +102,11 @@ from queue_lifecycle import (
 )
 from queue_run_reporting import build_queue_run_summary as build_queue_run_summary_model
 from queue_run_reporting import write_queue_snapshot as write_queue_snapshot_model
+from queue_path_sync_tasks import (
+    enqueue_path_sync_task as enqueue_path_sync_task_model,
+    run_next_path_sync_task as run_next_path_sync_task_model,
+    should_schedule_next_path_sync_task as should_schedule_next_path_sync_task_model,
+)
 from queue_table_model import QueueTableModel, QueueTableModelHooks
 from queue_tree_ui import (
     TREE_HIP_ROLE,
@@ -697,11 +702,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.queue_table.viewport().update()
 
     def _enqueue_path_sync_task(self, task: dict[str, Any]) -> None:
-        self._pending_path_sync_tasks.append(dict(task))
+        enqueue_path_sync_task_model(self._pending_path_sync_tasks, task)
         self._schedule_next_path_sync_task()
 
     def _schedule_next_path_sync_task(self) -> None:
-        if self._path_sync_task_active or not self._pending_path_sync_tasks:
+        if not should_schedule_next_path_sync_task_model(
+            path_sync_task_active=self._path_sync_task_active,
+            pending_tasks=self._pending_path_sync_tasks,
+        ):
             return
         self._path_sync_task_active = True
         QtCore.QTimer.singleShot(0, self._run_next_path_sync_task)
@@ -711,48 +719,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self._path_sync_task_active = False
             self._refresh_ui_state()
             return
-        task = self._pending_path_sync_tasks.pop(0)
-        ids = list(task.get("ids", []) or [])
-        before_states = list(task.get("before_states", []) or [])
-        undo_select_job_ids = list(task.get("undo_select_job_ids", []) or [])
-        redo_select_job_ids = list(task.get("redo_select_job_ids", []) or [])
-        reset_override_to_rop = bool(task.get("reset_override_to_rop", False))
-        notification_label = str(task.get("notification_label", "") or "").strip()
         refresh_needed = False
-        processed_ids: set[str] = set()
         try:
-            self._refresh_queue_tree_view()
-            target_jobs = [job for job in self.jobs if job.id in set(ids)]
-            by_hip: dict[str, list[RenderJob]] = {}
-            for job in target_jobs:
-                by_hip.setdefault(str(job.spec.hip_path or ""), []).append(job)
-            for hip_jobs in by_hip.values():
-                self._refresh_jobs_from_rop_metadata(hip_jobs, reset_override_to_rop=reset_override_to_rop)
-                hip_job_ids = [job.id for job in hip_jobs]
-                processed_ids.update(hip_job_ids)
-                self._end_path_sync_lock(hip_job_ids)
-            self._push_history_command(
-                {
-                    "kind": "update_jobs",
-                    "before": before_states,
-                    "after": self._job_states_for_ids(ids),
-                    "undo_select_job_ids": undo_select_job_ids,
-                    "redo_select_job_ids": redo_select_job_ids,
-                }
+            refresh_needed = run_next_path_sync_task_model(
+                jobs=self.jobs,
+                pending_tasks=self._pending_path_sync_tasks,
+                offline_status=JobStatus.OFFLINE,
+                refresh_queue_tree_view=self._refresh_queue_tree_view,
+                refresh_jobs_from_rop_metadata=lambda hip_jobs, reset_override_to_rop: self._refresh_jobs_from_rop_metadata(
+                    hip_jobs,
+                    reset_override_to_rop=reset_override_to_rop,
+                ),
+                end_path_sync_lock=self._end_path_sync_lock,
+                push_history_command=self._push_history_command,
+                job_states_for_ids=self._job_states_for_ids,
+                save_queue_state=self._save_queue_state,
+                append_notification_message=self._append_notification_message,
             )
-            self._save_queue_state()
-            if notification_label:
-                affected_jobs = [job for job in self.jobs if job.id in set(ids)]
-                offline_count = sum(1 for job in affected_jobs if job.runtime.status == JobStatus.OFFLINE)
-                message = f"{notification_label}: {len(affected_jobs)} job(s) refreshed"
-                if offline_count:
-                    message += f", {offline_count} offline"
-                self._append_notification_message(message + ".", "warning" if offline_count else "info")
-            refresh_needed = True
         finally:
-            remaining_ids = [job_id for job_id in ids if job_id not in processed_ids]
-            if remaining_ids:
-                self._end_path_sync_lock(remaining_ids)
             if refresh_needed:
                 self._refresh_queue_table()
             self._path_sync_task_active = False
