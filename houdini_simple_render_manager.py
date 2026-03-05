@@ -124,6 +124,16 @@ from queue_output_paths import (
     normalize_output_display_path as normalize_output_display_path_model,
     output_folder_from_value as output_folder_from_value_model,
 )
+from queue_frame_scan import (
+    first_missing_frame_and_contiguous_done as first_missing_frame_and_contiguous_done_model,
+    missing_frame_runs_and_existing_count as missing_frame_runs_and_existing_count_model,
+)
+from queue_history import (
+    apply_history_command as apply_history_command_model,
+    bounded_undo_stack as bounded_undo_stack_model,
+    history_command_targets_job as history_command_targets_job_model,
+    should_push_history_command as should_push_history_command_model,
+)
 from queue_progress_state import (
     job_phase_display as job_phase_display_model,
     parse_percent_value as parse_percent_value_model,
@@ -3560,24 +3570,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 safe_message(self, probe_decision.title, probe_decision.message)
             return None
 
-        total = ((end_frame - start_frame) // step) + 1
-        contiguous_done = 0
-        first_missing: int | None = None
-        for frame in range(start_frame, end_frame + 1, step):
-            expected = self._frame_sequence_path_for_frame(probe_path, frame)
-            if expected is None:
-                return None
+        def _exists_nonempty(path: Path) -> bool:
             try:
-                exists = expected.exists()
-                size_ok = expected.stat().st_size > 0 if exists else False
+                exists = path.exists()
+                return bool(exists and path.stat().st_size > 0)
             except OSError:
-                exists = False
-                size_ok = False
-            if exists and size_ok and first_missing is None:
-                contiguous_done += 1
-                continue
-            first_missing = frame
-            break
+                return False
+
+        scan = first_missing_frame_and_contiguous_done_model(
+            start_frame=start_frame,
+            end_frame=end_frame,
+            step=step,
+            path_for_frame=lambda frame: self._frame_sequence_path_for_frame(probe_path, frame),
+            exists_nonempty=_exists_nonempty,
+        )
+        if scan is None:
+            return None
+        first_missing, contiguous_done, total = scan
 
         if contiguous_done >= total:
             if interactive:
@@ -3644,38 +3653,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 safe_message(self, probe_decision.title, probe_decision.message)
             return None
 
-        existing_count = 0
-        missing_frames: list[int] = []
-        for frame in range(start_frame, end_frame + 1, step):
-            expected = self._frame_sequence_path_for_frame(probe_path, frame)
-            if expected is None:
-                return None
+        def _exists_nonempty(path: Path) -> bool:
             try:
-                exists = expected.exists()
-                size_ok = expected.stat().st_size > 0 if exists else False
+                exists = path.exists()
+                return bool(exists and path.stat().st_size > 0)
             except OSError:
-                exists = False
-                size_ok = False
-            if exists and size_ok:
-                existing_count += 1
-            else:
-                missing_frames.append(frame)
+                return False
 
-        if not missing_frames:
-            return [], existing_count
-
-        runs: list[tuple[int, int, int]] = []
-        run_start = missing_frames[0]
-        run_prev = missing_frames[0]
-        for frame in missing_frames[1:]:
-            if frame == run_prev + step:
-                run_prev = frame
-                continue
-            runs.append((run_start, run_prev, step))
-            run_start = frame
-            run_prev = frame
-        runs.append((run_start, run_prev, step))
-        return runs, existing_count
+        scan = missing_frame_runs_and_existing_count_model(
+            start_frame=start_frame,
+            end_frame=end_frame,
+            step=step,
+            path_for_frame=lambda frame: self._frame_sequence_path_for_frame(probe_path, frame),
+            exists_nonempty=_exists_nonempty,
+        )
+        if scan is None:
+            return None
+        return scan
 
     def _resume_job_from_output(self, job: RenderJob) -> None:
         decision = can_resume_job_from_output(
@@ -3733,18 +3727,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.jobs = apply_job_order_model(self.jobs, ordered_ids)
 
     def _push_history_command(self, command: dict[str, Any]) -> None:
-        if self._history_applying:
-            return
-        kind = str(command.get("kind", "") or "")
-        if kind in {"insert_jobs", "remove_jobs"} and not list(command.get("entries", []) or []):
-            return
-        if kind == "update_jobs" and list(command.get("before", []) or []) == list(command.get("after", []) or []):
-            return
-        if kind == "reorder_jobs" and list(command.get("before_order", []) or []) == list(command.get("after_order", []) or []):
+        if not should_push_history_command_model(history_applying=self._history_applying, command=command):
             return
         self._undo_stack.append(command)
-        if len(self._undo_stack) > 100:
-            self._undo_stack = self._undo_stack[-100:]
+        self._undo_stack = bounded_undo_stack_model(self._undo_stack, max_size=100)
         self._redo_stack.clear()
 
     def _clear_history(self) -> None:
@@ -3753,55 +3739,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _history_command_targets_active_job(self, command: dict[str, Any]) -> bool:
         active_job_id = str(self.current_job_id or "")
-        if not active_job_id:
-            return False
-        candidate_ids: set[str] = set()
-        for key in ("before", "after"):
-            for state in list(command.get(key, []) or []):
-                if isinstance(state, dict):
-                    job_id = str(state.get("id", "") or "").strip()
-                    if job_id:
-                        candidate_ids.add(job_id)
-        for entry in list(command.get("entries", []) or []):
-            if not isinstance(entry, dict):
-                continue
-            job_state = entry.get("job")
-            if isinstance(job_state, dict):
-                job_id = str(job_state.get("id", "") or "").strip()
-                if job_id:
-                    candidate_ids.add(job_id)
-        for key in ("before_order", "after_order", "undo_select_job_ids", "redo_select_job_ids"):
-            for job_id in list(command.get(key, []) or []):
-                text = str(job_id or "").strip()
-                if text:
-                    candidate_ids.add(text)
-        return active_job_id in candidate_ids
+        return history_command_targets_job_model(command, active_job_id=active_job_id)
 
     def _apply_history_command(self, command: dict[str, Any], *, undo: bool) -> None:
-        kind = str(command.get("kind", "") or "")
-        undo_select = list(command.get("undo_select_job_ids", []) or [])
-        redo_select = list(command.get("redo_select_job_ids", []) or [])
-        select_ids = undo_select if undo else redo_select
+        select_ids: list[str] = []
         self._history_applying = True
         try:
-            if kind == "insert_jobs":
-                entries = list(command.get("entries", []) or [])
-                if undo:
-                    self._remove_jobs_by_ids([str(entry.get("job", {}).get("id", "") or "") for entry in entries])
-                else:
-                    self._insert_jobs_from_entries(entries)
-            elif kind == "remove_jobs":
-                entries = list(command.get("entries", []) or [])
-                if undo:
-                    self._insert_jobs_from_entries(entries)
-                else:
-                    self._remove_jobs_by_ids([str(entry.get("job", {}).get("id", "") or "") for entry in entries])
-            elif kind == "update_jobs":
-                states = list(command.get("before", []) if undo else command.get("after", []))
-                self._apply_job_states(states)
-            elif kind == "reorder_jobs":
-                order = list(command.get("before_order", []) if undo else command.get("after_order", []))
-                self._apply_job_order(order)
+            select_ids = apply_history_command_model(
+                command,
+                undo=undo,
+                remove_jobs_by_ids=self._remove_jobs_by_ids,
+                insert_jobs_from_entries=self._insert_jobs_from_entries,
+                apply_job_states=self._apply_job_states,
+                apply_job_order=self._apply_job_order,
+            )
         finally:
             self._history_applying = False
         self._save_queue_state()
