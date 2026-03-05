@@ -109,6 +109,10 @@ from queue_lifecycle import (
 )
 from queue_run_reporting import build_queue_run_summary as build_queue_run_summary_model
 from queue_run_reporting import write_queue_snapshot as write_queue_snapshot_model
+from queue_reload_flow import (
+    defer_reload_values_from_file as defer_reload_values_from_file_model,
+    run_reload_all_jobs_from_file as run_reload_all_jobs_from_file_model,
+)
 from queue_path_sync_tasks import (
     enqueue_path_sync_task as enqueue_path_sync_task_model,
     run_next_path_sync_task as run_next_path_sync_task_model,
@@ -3455,11 +3459,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if not reload_decision.allowed:
                 safe_message(self, "Reload From File", reload_decision.reason)
                 return
-            self._defer_reload_jobs_from_file(
+            defer_reload_values_from_file_model(
                 target_jobs,
-                reset_override_to_rop=True,
-                status_text="Reloading values from file...",
-                notification_label="Reload Values from File",
+                defer_reload_jobs_from_file=self._defer_reload_jobs_from_file,
             )
         elif chosen == act_duplicate:
             self._duplicate_selected_jobs()
@@ -5051,16 +5053,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _reload_all_jobs_from_files(self) -> None:
         if self._scan_in_progress():
             return
-        target_jobs = [job for job in self.jobs if job.runtime.status != JobStatus.RUNNING]
-        if not target_jobs:
-            self._set_status_message("No jobs to reload from file.", 3000)
-            return
-        self._write_queue_snapshot("before_reload_all")
-        self._defer_reload_jobs_from_file(
-            target_jobs,
-            reset_override_to_rop=False,
-            status_text="Reloading all jobs from file...",
-            notification_label="Reload All",
+        run_reload_all_jobs_from_file_model(
+            self.jobs,
+            running_status=JobStatus.RUNNING,
+            write_queue_snapshot=self._write_queue_snapshot,
+            defer_reload_jobs_from_file=self._defer_reload_jobs_from_file,
+            set_status_message=self._set_status_message,
         )
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
