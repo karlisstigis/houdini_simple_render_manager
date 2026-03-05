@@ -119,6 +119,20 @@ from queue_header_grouping import (
     queue_header_visual_order as queue_header_visual_order_model,
     queue_hidden_columns_from_data as queue_hidden_columns_from_data_model,
 )
+from queue_output_paths import (
+    frame_sequence_path_for_frame as frame_sequence_path_for_frame_model,
+    normalize_output_display_path as normalize_output_display_path_model,
+    output_folder_from_value as output_folder_from_value_model,
+)
+from queue_progress_state import (
+    job_phase_display as job_phase_display_model,
+    parse_percent_value as parse_percent_value_model,
+    queue_progress_split_values as queue_progress_split_values_model,
+)
+from usd_queue_status import (
+    usd_status_display as usd_status_display_model,
+    usd_status_tooltip as usd_status_tooltip_model,
+)
 from queue_table_model import QueueTableModel, QueueTableModelHooks
 from queue_tree_ui import (
     TREE_HIP_ROLE,
@@ -1231,34 +1245,24 @@ class MainWindow(QtWidgets.QMainWindow):
         return expanded
 
     def _job_phase_display(self, job: RenderJob) -> str:
-        phase = (job.view.phase_text or "").strip()
-        if job.runtime.chunk_total_runtime > 1:
-            chunk_part = f"Chunk {max(1, job.runtime.chunk_index_runtime + 1)}/{job.runtime.chunk_total_runtime}"
-            if job.runtime.chunk_attempt_runtime > 1:
-                chunk_part += f" r{job.runtime.chunk_attempt_runtime}"
-            if phase:
-                return f"{phase} ({chunk_part})"
-            return chunk_part
-        return phase
+        return job_phase_display_model(job)
 
     def _job_usd_status_display(self, job: RenderJob) -> str:
         retained_path = str(job.runtime.retained_usd_path or "").strip()
-        if not retained_path or not bool(job.runtime.retained_usd_exists):
-            return "Build"
-        if self._retained_usd_stale_reason(job):
-            return "Rebuild"
-        return "Reusable"
+        return usd_status_display_model(
+            retained_path=retained_path,
+            retained_exists=bool(job.runtime.retained_usd_exists),
+            stale_reason=self._retained_usd_stale_reason(job),
+        )
 
     def _job_usd_status_tooltip(self, job: RenderJob) -> str:
         retained_path = str(job.runtime.retained_usd_path or "").strip()
-        if not retained_path or not bool(job.runtime.retained_usd_exists):
-            return "No retained USD is available for this job. USD will be built during render."
-        reason = self._retained_usd_stale_reason(job)
-        if reason:
-            return reason
-        if not bool(job.spec.reuse_retained_usd):
-            return "Retained USD is reusable, but 'Use existing USD files' is disabled."
-        return "Retained USD can be reused on next render."
+        return usd_status_tooltip_model(
+            retained_path=retained_path,
+            retained_exists=bool(job.runtime.retained_usd_exists),
+            stale_reason=self._retained_usd_stale_reason(job),
+            reuse_retained_usd=bool(job.spec.reuse_retained_usd),
+        )
 
     @staticmethod
     def _job_time_remaining_display(job: RenderJob) -> str:
@@ -3484,66 +3488,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _frame_sequence_path_for_frame(sample_path: str, frame: int) -> Path | None:
-        text = str(sample_path or "").strip()
-        p = Path(text)
-        if not p.name or text.lower() == "ip":
-            return None
-        # Handle common Houdini frame tokens directly (scan metadata often contains tokenized paths).
-        frame_abs = abs(int(frame))
-        frame_sign = "-" if int(frame) < 0 else ""
-
-        def _pad(width: int | None) -> str:
-            w = max(1, int(width or 1))
-            return f"{frame_sign}{frame_abs:0{w}d}"
-
-        name = p.name
-        token_patterns: list[tuple[str, re.Pattern[str]]] = [
-            ("angle", re.compile(r"<F(\d*)>", re.IGNORECASE)),
-            ("brace", re.compile(r"\$\{F(\d*)\}", re.IGNORECASE)),
-            ("dollar", re.compile(r"\$F(\d*)", re.IGNORECASE)),
-        ]
-        for _label, pat in token_patterns:
-            if pat.search(name):
-                replaced = pat.sub(lambda m: _pad(int(m.group(1)) if m.group(1) else None), name)
-                return p.with_name(replaced)
-
-        # If the path still appears tokenized (other formats), do not guess from incidental digits.
-        if any(tok in name for tok in ("$F", "${F", "<F", "%0")):
-            return None
-
-        stem = p.stem
-        m = re.search(r"(-?\d+)(?!.*\d)", stem)
-        if not m:
-            return None
-        token = m.group(1)
-        negative = token.startswith("-")
-        width = len(token) - (1 if negative else 0)
-        prefix = stem[: m.start(1)]
-        suffix = stem[m.end(1) :]
-        if frame < 0:
-            body = f"-{abs(frame):0{max(1, width)}d}"
-        else:
-            body = f"{frame:0{max(1, width)}d}"
-        filename = f"{prefix}{body}{suffix}{p.suffix}"
-        return p.with_name(filename)
+        return frame_sequence_path_for_frame_model(sample_path, frame)
 
     @staticmethod
     def _normalize_output_display_path(path_text: str) -> str:
-        text = str(path_text or "").strip()
-        if not text:
-            return ""
-        if text.lower() == "ip":
-            return "ip"
-        p = Path(text)
-        return str(p.parent if p.suffix else p)
+        return normalize_output_display_path_model(path_text)
 
     @staticmethod
     def _output_folder_from_value(path_text: str) -> Path | None:
-        text = str(path_text or "").strip()
-        if not text or text.lower() == "ip":
-            return None
-        p = Path(text)
-        return p.parent if p.suffix else p
+        return output_folder_from_value_model(path_text)
 
     def _compute_resume_from_output(
         self,
@@ -4439,45 +4392,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _parse_percent_value(text: str) -> int | None:
-        m = re.search(r"(\d{1,3})\s*%", str(text or ""))
-        if not m:
-            return None
-        try:
-            return max(0, min(100, int(m.group(1))))
-        except ValueError:
-            return None
+        return parse_percent_value_model(text)
 
     def _queue_progress_split_values(self, job: RenderJob) -> tuple[int | None, int | None]:
-        pct = self._parse_percent_value(job.view.percent_text)
-        build_pct: int | None = None
-        render_pct: int | None = None
-        show_usd_build = (job.runtime.allframesatonce_enabled is True)
-
-        if job.runtime.status == JobStatus.DONE:
-            render_pct = 100
-            if show_usd_build and job.view.usd_build_percent is not None:
-                build_pct = job.view.usd_build_percent
-            else:
-                build_pct = 100 if show_usd_build else None
-            return build_pct, render_pct
-
-        if show_usd_build and job.view.phase_text == "USD Build":
-            build_pct = job.view.usd_build_percent if job.view.usd_build_percent is not None else pct
-            render_pct = 0
-            return build_pct, render_pct
-        if job.view.phase_text == "Render":
-            render_pct = pct
-            if show_usd_build and job.view.usd_build_percent is not None:
-                build_pct = job.view.usd_build_percent
-            else:
-                build_pct = 100 if show_usd_build and job.view.build_pass_completed else None
-            return build_pct, render_pct
-
-        if pct is not None:
-            render_pct = pct
-        if show_usd_build and job.view.usd_build_percent is not None:
-            build_pct = job.view.usd_build_percent
-        return build_pct, render_pct
+        return queue_progress_split_values_model(job)
 
     def _queue_header_visual_order(self) -> list[int]:
         header = self.queue_table.horizontalHeader()
