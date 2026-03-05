@@ -107,6 +107,12 @@ from queue_path_sync_tasks import (
     run_next_path_sync_task as run_next_path_sync_task_model,
     should_schedule_next_path_sync_task as should_schedule_next_path_sync_task_model,
 )
+from queue_path_sync_lock import (
+    advance_path_sync_overlay as advance_path_sync_overlay_model,
+    begin_path_sync_lock as begin_path_sync_lock_model,
+    end_path_sync_lock as end_path_sync_lock_model,
+    is_job_path_sync_locked as is_job_path_sync_locked_model,
+)
 from queue_table_model import QueueTableModel, QueueTableModelHooks
 from queue_tree_ui import (
     TREE_HIP_ROLE,
@@ -645,41 +651,25 @@ class MainWindow(QtWidgets.QMainWindow):
         return bool(job is not None and self.current_job_id and job.id == self.current_job_id)
 
     def _is_job_path_sync_locked(self, job: RenderJob | str | None) -> bool:
-        if job is None:
-            return False
-        job_id = str(job if isinstance(job, str) else getattr(job, "id", "") or "").strip()
-        if not job_id:
-            return False
-        return bool(self._path_sync_lock_counts.get(job_id, 0))
+        return is_job_path_sync_locked_model(self._path_sync_lock_counts, job)
 
     def _begin_path_sync_lock(self, job_ids: list[str]) -> None:
-        locked_ids = [str(job_id or "").strip() for job_id in job_ids if str(job_id or "").strip()]
+        locked_ids, started_overlay = begin_path_sync_lock_model(self._path_sync_lock_counts, job_ids)
         if not locked_ids:
             return
-        if not self._path_sync_lock_counts:
+        if started_overlay:
             self._path_sync_overlay_progress = 0.0
             if hasattr(self, "queue_table"):
                 self.queue_table.setProperty("pathSyncOverlayProgress", self._path_sync_overlay_progress)
             self._path_sync_overlay_timer.start()
-        for job_id in locked_ids:
-            self._path_sync_lock_counts[job_id] = int(self._path_sync_lock_counts.get(job_id, 0)) + 1
         self.queue_table_model.refresh_jobs_by_id(locked_ids)
         self._refresh_ui_state()
 
     def _end_path_sync_lock(self, job_ids: list[str]) -> None:
-        locked_ids = [str(job_id or "").strip() for job_id in job_ids if str(job_id or "").strip()]
-        if not locked_ids:
+        changed_ids, stopped_overlay = end_path_sync_lock_model(self._path_sync_lock_counts, job_ids)
+        if not changed_ids:
             return
-        changed_ids: list[str] = []
-        for job_id in locked_ids:
-            count = int(self._path_sync_lock_counts.get(job_id, 0))
-            if count <= 1:
-                if job_id in self._path_sync_lock_counts:
-                    del self._path_sync_lock_counts[job_id]
-            else:
-                self._path_sync_lock_counts[job_id] = count - 1
-            changed_ids.append(job_id)
-        if not self._path_sync_lock_counts:
+        if stopped_overlay:
             self._path_sync_overlay_timer.stop()
             self._path_sync_overlay_progress = 0.0
             if hasattr(self, "queue_table"):
@@ -690,13 +680,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_ui_state()
 
     def _advance_path_sync_overlay(self) -> None:
-        if not self._path_sync_lock_counts:
+        self._path_sync_overlay_progress, active = advance_path_sync_overlay_model(
+            self._path_sync_lock_counts,
+            self._path_sync_overlay_progress,
+        )
+        if not active:
             self._path_sync_overlay_timer.stop()
-            self._path_sync_overlay_progress = 0.0
             if hasattr(self, "queue_table"):
                 self.queue_table.setProperty("pathSyncOverlayProgress", self._path_sync_overlay_progress)
             return
-        self._path_sync_overlay_progress = (float(self._path_sync_overlay_progress) + 0.0225) % 1.0
         if hasattr(self, "queue_table"):
             self.queue_table.setProperty("pathSyncOverlayProgress", self._path_sync_overlay_progress)
             self.queue_table.viewport().update()
