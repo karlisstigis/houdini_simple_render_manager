@@ -235,6 +235,12 @@ from queue_selection_helpers import (
     selected_row_from_view_rows as selected_row_from_view_rows_model,
     source_rows_from_view_rows as source_rows_from_view_rows_model,
 )
+from queue_refresh_defer import (
+    next_pending_refresh_action as next_pending_refresh_action_model,
+    pending_refresh_args as pending_refresh_args_model,
+    should_defer_queue_refresh as should_defer_queue_refresh_model,
+)
+from queue_undo_redo import pop_history_for_shortcut as pop_history_for_shortcut_model
 from theme_support import DEFAULT_THEME, build_app_stylesheet, ensure_theme_icons, normalize_theme_colors
 from widgets import AddJobPanel, CleanStepSpinBox, JobPropertiesPanel, PanelFrame, PreferencesDialog, QueueTableItemDelegate, QueueTableWidget, RopListWidget
 from worker_client import RenderWorkerClient, ScanWorkerClient
@@ -2785,34 +2791,34 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _queue_refresh_should_defer(self) -> bool:
         focus = QtWidgets.QApplication.focusWidget()
-        if focus is None:
-            return False
-        if self.queue_table.state() == QtWidgets.QAbstractItemView.State.EditingState:
-            return True
-        if focus is self.queue_table or self.queue_table.isAncestorOf(focus):
-            return isinstance(
-                focus,
-                (
-                    QtWidgets.QLineEdit,
-                    QtWidgets.QAbstractSpinBox,
-                    QtWidgets.QComboBox,
-                    QtWidgets.QPlainTextEdit,
-                    QtWidgets.QTextEdit,
-                ),
-            )
-        if hasattr(self, "add_job_panel") and self.add_job_panel is not None and self.add_job_panel.isAncestorOf(focus):
-            return isinstance(
-                focus,
-                (
-                    QtWidgets.QLineEdit,
-                    QtWidgets.QAbstractSpinBox,
-                    QtWidgets.QComboBox,
-                    QtWidgets.QPlainTextEdit,
-                    QtWidgets.QTextEdit,
-                    QtWidgets.QListWidget,
-                ),
-            )
-        return False
+        focus_in_queue = bool(focus is self.queue_table or (focus is not None and self.queue_table.isAncestorOf(focus)))
+        focus_in_add_panel = bool(
+            hasattr(self, "add_job_panel")
+            and self.add_job_panel is not None
+            and focus is not None
+            and self.add_job_panel.isAncestorOf(focus)
+        )
+        return should_defer_queue_refresh_model(
+            focus=focus,
+            queue_is_editing=self.queue_table.state() == QtWidgets.QAbstractItemView.State.EditingState,
+            focus_in_queue=focus_in_queue,
+            focus_in_add_panel=focus_in_add_panel,
+            queue_editable_types=(
+                QtWidgets.QLineEdit,
+                QtWidgets.QAbstractSpinBox,
+                QtWidgets.QComboBox,
+                QtWidgets.QPlainTextEdit,
+                QtWidgets.QTextEdit,
+            ),
+            add_panel_editable_types=(
+                QtWidgets.QLineEdit,
+                QtWidgets.QAbstractSpinBox,
+                QtWidgets.QComboBox,
+                QtWidgets.QPlainTextEdit,
+                QtWidgets.QTextEdit,
+                QtWidgets.QListWidget,
+            ),
+        )
 
     def _on_queue_filter_changed(self) -> None:
         proxy = self._queue_proxy_model()
@@ -2829,12 +2835,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_ui_state()
 
     def _flush_pending_queue_refresh(self) -> None:
-        if not self._pending_queue_refresh_args:
-            return
-        if self._queue_refresh_should_defer():
+        args, should_reschedule = next_pending_refresh_action_model(
+            self._pending_queue_refresh_args,
+            should_defer=self._queue_refresh_should_defer(),
+        )
+        if should_reschedule:
             self._pending_queue_refresh_timer.start(200)
             return
-        args = dict(self._pending_queue_refresh_args)
+        if args is None:
+            return
         self._pending_queue_refresh_args = None
         self._refresh_queue_table(**args)
 
@@ -3774,25 +3783,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_queue_table(select_job_ids=select_ids or None)
 
     def _undo_queue_edit(self) -> None:
-        if self._scan_in_progress():
+        command = pop_history_for_shortcut_model(
+            self._undo_stack,
+            scan_in_progress=self._scan_in_progress(),
+            command_targets_active=self._history_command_targets_active_job,
+        )
+        if command is None:
             return
-        if not self._undo_stack:
-            return
-        if self._history_command_targets_active_job(self._undo_stack[-1]):
-            return
-        command = self._undo_stack.pop()
         self._apply_history_command(command, undo=True)
         self._redo_stack.append(command)
         self._set_status_message("Undo", 1500)
 
     def _redo_queue_edit(self) -> None:
-        if self._scan_in_progress():
+        command = pop_history_for_shortcut_model(
+            self._redo_stack,
+            scan_in_progress=self._scan_in_progress(),
+            command_targets_active=self._history_command_targets_active_job,
+        )
+        if command is None:
             return
-        if not self._redo_stack:
-            return
-        if self._history_command_targets_active_job(self._redo_stack[-1]):
-            return
-        command = self._redo_stack.pop()
         self._apply_history_command(command, undo=False)
         self._undo_stack.append(command)
         self._set_status_message("Redo", 1500)
@@ -4082,11 +4091,11 @@ class MainWindow(QtWidgets.QMainWindow):
         select_job_ids: list[str] | None = None,
     ) -> None:
         if self._queue_refresh_should_defer():
-            self._pending_queue_refresh_args = {
-                "select_row": select_row,
-                "select_job_id": select_job_id,
-                "select_job_ids": list(select_job_ids or []) or None,
-            }
+            self._pending_queue_refresh_args = pending_refresh_args_model(
+                select_row=select_row,
+                select_job_id=select_job_id,
+                select_job_ids=select_job_ids,
+            )
             self._pending_queue_refresh_timer.start(200)
             return
         preserved_job_id: str | None = None
@@ -4161,11 +4170,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if row < 0:
             return
         if self._queue_refresh_should_defer():
-            self._pending_queue_refresh_args = {
-                "select_row": None,
-                "select_job_id": target_id,
-                "select_job_ids": None,
-            }
+            self._pending_queue_refresh_args = pending_refresh_args_model(select_job_id=target_id)
             self._pending_queue_refresh_timer.start(200)
             return
         self.queue_table_model.refresh_job_by_id(target_id)
