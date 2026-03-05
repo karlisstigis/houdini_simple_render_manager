@@ -3,7 +3,13 @@ from __future__ import annotations
 import unittest
 
 from queue_models import RenderJob
-from queue_targeting import selected_job_for_row, selection_ids_for_refresh, tree_context_target_jobs
+from queue_targeting import (
+    current_job_by_id,
+    job_row_by_id,
+    selected_job_for_row,
+    selection_ids_for_refresh,
+    tree_context_target_jobs,
+)
 
 
 class QueueTargetingTests(unittest.TestCase):
@@ -33,6 +39,15 @@ class QueueTargetingTests(unittest.TestCase):
         self.assertIs(selected_job_for_row(jobs, 0), j1)
         self.assertIsNone(selected_job_for_row(jobs, -1))
         self.assertIsNone(selected_job_for_row(jobs, 2))
+
+    def test_job_row_by_id_and_current_job_by_id(self) -> None:
+        j1 = RenderJob("E:/a.hip", "/stage/main", "use_rop")
+        j2 = RenderJob("E:/b.hip", "/stage/main", "use_rop")
+        jobs = [j1, j2]
+        self.assertEqual(job_row_by_id(jobs, j2.id), 1)
+        self.assertEqual(job_row_by_id(jobs, "missing"), -1)
+        self.assertIs(current_job_by_id(jobs, j1.id), j1)
+        self.assertIsNone(current_job_by_id(jobs, ""))
 
 
 if __name__ == "__main__":

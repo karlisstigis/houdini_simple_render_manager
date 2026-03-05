@@ -36,3 +36,17 @@ def selected_job_for_row(jobs: list[RenderJob], row: int) -> RenderJob | None:
     if 0 <= row < len(jobs):
         return jobs[row]
     return None
+
+
+def job_row_by_id(jobs: list[RenderJob], job_id: str) -> int:
+    target = str(job_id or "").strip()
+    if not target:
+        return -1
+    return next((idx for idx, job in enumerate(jobs) if job.id == target), -1)
+
+
+def current_job_by_id(jobs: list[RenderJob], current_job_id: str) -> RenderJob | None:
+    row = job_row_by_id(jobs, current_job_id)
+    if row < 0:
+        return None
+    return jobs[row]

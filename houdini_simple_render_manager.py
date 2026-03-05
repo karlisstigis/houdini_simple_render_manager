@@ -242,15 +242,32 @@ from queue_job_paths import (
     safe_usd_folder_name as safe_usd_folder_name_model,
 )
 from queue_targeting import (
+    current_job_by_id as current_job_by_id_model,
+    job_row_by_id as job_row_by_id_model,
     selected_job_for_row as selected_job_for_row_model,
     selection_ids_for_refresh as selection_ids_for_refresh_model,
     tree_context_target_jobs as tree_context_target_jobs_model,
 )
 from queue_model_text import queue_model_display_text as queue_model_display_text_model
+from queue_output_probe import (
+    initial_probe_path as initial_probe_path_model,
+    needs_pattern_refresh as needs_pattern_refresh_model,
+    path_exists_nonempty as path_exists_nonempty_model,
+)
+from queue_refresh_selection import (
+    clamped_select_row as clamped_select_row_model,
+    preserved_selection as preserved_selection_model,
+    target_selection as target_selection_model,
+)
 from queue_refresh_defer import (
     next_pending_refresh_action as next_pending_refresh_action_model,
     pending_refresh_args as pending_refresh_args_model,
     should_defer_queue_refresh as should_defer_queue_refresh_model,
+)
+from queue_start_control import (
+    blocked_start_title as blocked_start_title_model,
+    should_set_selected_rerun_status as should_set_selected_rerun_status_model,
+    start_queue_runnable_state as start_queue_runnable_state_model,
 )
 from queue_undo_redo import pop_history_for_shortcut as pop_history_for_shortcut_model
 from theme_support import DEFAULT_THEME, build_app_stylesheet, ensure_theme_icons, normalize_theme_colors
@@ -3532,7 +3549,7 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> tuple[int, int, int, int] | None:
         sample_file_path = (job.view.out_file_sample_path or "").strip()
         out_path = (job.view.out_path or "").strip()
-        probe_path = sample_file_path or out_path
+        probe_path = initial_probe_path_model(sample_file_path, out_path)
         strict_decision = validate_resume_from_output_inputs(strict_frame_range=job.spec.strict_frame_range)
         if not strict_decision.valid:
             if interactive and strict_decision.title:
@@ -3549,11 +3566,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # If we only have a folder (or an unpatterned path), refresh metadata from the ROP first.
         # This often gives us a resolved sample filename path without needing to start the render.
-        needs_pattern_refresh = (
-            (not probe_path)
-            or (not sample_file_path)
-            or str(probe_path).lower() == "ip"
-            or self._frame_sequence_path_for_frame(sample_file_path or probe_path, start_frame) is None
+        needs_pattern_refresh = needs_pattern_refresh_model(
+            probe_path=probe_path,
+            sample_file_path=sample_file_path,
+            start_frame=start_frame,
+            frame_path_for_frame=self._frame_sequence_path_for_frame,
         )
         if needs_pattern_refresh and Path(job.spec.hip_path).exists() and self._hbatch_exists():
             info = self._probe_rop_info(job.spec.hip_path, job.spec.rop_path)
@@ -3586,19 +3603,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 safe_message(self, probe_decision.title, probe_decision.message)
             return None
 
-        def _exists_nonempty(path: Path) -> bool:
-            try:
-                exists = path.exists()
-                return bool(exists and path.stat().st_size > 0)
-            except OSError:
-                return False
-
         scan = first_missing_frame_and_contiguous_done_model(
             start_frame=start_frame,
             end_frame=end_frame,
             step=step,
             path_for_frame=lambda frame: self._frame_sequence_path_for_frame(probe_path, frame),
-            exists_nonempty=_exists_nonempty,
+            exists_nonempty=path_exists_nonempty_model,
         )
         if scan is None:
             return None
@@ -3636,12 +3646,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         sample_file_path = (job.view.out_file_sample_path or "").strip()
         out_path = (job.view.out_path or "").strip()
-        probe_path = sample_file_path or out_path
-        needs_pattern_refresh = (
-            (not probe_path)
-            or (not sample_file_path)
-            or str(probe_path).lower() == "ip"
-            or self._frame_sequence_path_for_frame(sample_file_path or probe_path, start_frame) is None
+        probe_path = initial_probe_path_model(sample_file_path, out_path)
+        needs_pattern_refresh = needs_pattern_refresh_model(
+            probe_path=probe_path,
+            sample_file_path=sample_file_path,
+            start_frame=start_frame,
+            frame_path_for_frame=self._frame_sequence_path_for_frame,
         )
         if needs_pattern_refresh and Path(job.spec.hip_path).exists() and self._hbatch_exists():
             info = self._probe_rop_info(job.spec.hip_path, job.spec.rop_path)
@@ -3669,19 +3679,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 safe_message(self, probe_decision.title, probe_decision.message)
             return None
 
-        def _exists_nonempty(path: Path) -> bool:
-            try:
-                exists = path.exists()
-                return bool(exists and path.stat().st_size > 0)
-            except OSError:
-                return False
-
         scan = missing_frame_runs_and_existing_count_model(
             start_frame=start_frame,
             end_frame=end_frame,
             step=step,
             path_for_frame=lambda frame: self._frame_sequence_path_for_frame(probe_path, frame),
-            exists_nonempty=_exists_nonempty,
+            exists_nonempty=path_exists_nonempty_model,
         )
         if scan is None:
             return None
@@ -4087,14 +4090,14 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self._pending_queue_refresh_timer.start(200)
             return
-        preserved_job_id: str | None = None
-        preserved_job_ids: list[str] = []
-        if select_row is None and select_job_id is None and not select_job_ids:
-            preserved_job_ids = [j.id for j in self._selected_jobs()]
-            if not preserved_job_ids:
-                selected = self._selected_job()
-                if selected is not None:
-                    preserved_job_id = selected.id
+        current_selected = self._selected_job()
+        preserved_job_ids, preserved_job_id = preserved_selection_model(
+            select_row=select_row,
+            select_job_id=select_job_id,
+            select_job_ids=select_job_ids,
+            current_selected_job_ids=[j.id for j in self._selected_jobs()],
+            current_selected_job_id=(current_selected.id if current_selected is not None else None),
+        )
 
         selection_model = self.queue_table.selectionModel()
         selection_blocker = QtCore.QSignalBlocker(selection_model) if selection_model is not None else None
@@ -4103,9 +4106,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.queue_table_model.refresh_all()
             self.queue_table.clearSelection()
 
-            target_job_id = select_job_id or preserved_job_id
-            target_job_ids = list(select_job_ids or preserved_job_ids)
-            target_job_id_set = set(target_job_ids)
+            target_job_id, target_job_ids, target_job_id_set = target_selection_model(
+                select_job_id=select_job_id,
+                select_job_ids=select_job_ids,
+                preserved_job_id=preserved_job_id,
+                preserved_job_ids=preserved_job_ids,
+            )
             selected_applied = False
             if target_job_ids:
                 sm = self.queue_table.selectionModel()
@@ -4130,7 +4136,10 @@ class MainWindow(QtWidgets.QMainWindow):
                             selected_applied = True
                         break
             elif select_row is not None and self.jobs:
-                model_idx = self._queue_view_index_from_source_row(max(0, min(select_row, len(self.jobs) - 1)), 0)
+                clamped_row = clamped_select_row_model(select_row, job_count=len(self.jobs))
+                if clamped_row is None:
+                    clamped_row = 0
+                model_idx = self._queue_view_index_from_source_row(clamped_row, 0)
                 if model_idx.isValid():
                     self.queue_table.selectRow(model_idx.row())
                     selected_applied = True
@@ -4155,7 +4164,7 @@ class MainWindow(QtWidgets.QMainWindow):
         target_id = str(job_id or "").strip()
         if not target_id:
             return
-        row = next((idx for idx, job in enumerate(self.jobs) if job.id == target_id), -1)
+        row = job_row_by_id_model(self.jobs, target_id)
         if row < 0:
             return
         if self._queue_refresh_should_defer():
@@ -4595,8 +4604,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _start_queue(self) -> None:
         selected = self._selected_job()
-        can_start_selected = self._is_job_runnable(selected)
-        has_runnable = any(self._is_job_runnable(job) for job in self.jobs)
+        can_start_selected, has_runnable = start_queue_runnable_state_model(
+            selected_job=selected,
+            is_runnable=self._is_job_runnable,
+            jobs=self.jobs,
+        )
         start_decision = evaluate_start_request_model(
             self._queue_lifecycle_state(),
             hbatch_exists=self._hbatch_exists(),
@@ -4613,7 +4625,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not bool(start_decision.allowed):
             reason = str(start_decision.reason or "")
-            title = "hbatch Missing" if "hbatch" in reason.lower() else "Queue Empty"
+            title = blocked_start_title_model(reason)
             safe_message(self, title, reason)
             return
         self._write_queue_snapshot("before_start")
@@ -4622,7 +4634,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_status_message("Queue started")
         self._refresh_ui_state()
         if can_start_selected:
-            if selected is not None and selected.runtime.status not in {JobStatus.RUNNING, JobStatus.QUEUED}:
+            if should_set_selected_rerun_status_model(selected):
                 self._queue_rerun_statuses = {selected.runtime.status}
             self._start_job(selected)
         else:
@@ -4708,12 +4720,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return {}
 
     def _current_job(self) -> RenderJob | None:
-        if not self.current_job_id:
-            return None
-        for job in self.jobs:
-            if job.id == self.current_job_id:
-                return job
-        return None
+        return current_job_by_id_model(self.jobs, str(self.current_job_id or ""))
 
     def _handle_render_worker_message(self, message: dict[str, Any]) -> None:
         handle_render_worker_message_model(self, message)
