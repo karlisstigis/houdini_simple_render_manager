@@ -76,6 +76,12 @@ from queue_execution import (
     advance_job_to_next_chunk as advance_job_to_next_chunk_model,
     retry_current_chunk as retry_current_chunk_model,
 )
+from log_panel_actions import (
+    delete_log_files as delete_log_files_model,
+    discover_log_files as discover_log_files_model,
+    log_deletion_feedback as log_deletion_feedback_model,
+    selected_job_log_path as selected_job_log_path_model,
+)
 from queue_filter_proxy import QueueFilterProxyModel, QUEUE_STATUS_FILTER_OPTIONS
 from queue_cell_editing import apply_queue_cell_edit as apply_queue_cell_edit_model
 from queue_run_executor import (
@@ -4907,10 +4913,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_job_log_handle = None
 
     def _open_selected_job_log(self) -> None:
-        job = self._selected_job()
-        if not job or not job.runtime.log_file_path:
+        path = selected_job_log_path_model(self._selected_job())
+        if path is None:
             return
-        path = Path(job.runtime.log_file_path)
         if not path.exists():
             safe_message(self, "Log Missing", f"Log file does not exist:\n{path}")
             return
@@ -4974,7 +4979,7 @@ class MainWindow(QtWidgets.QMainWindow):
             safe_message(self, decision.title or "Logs Folder", f"{decision.message}\n{logs_dir}", str(exc))
             return
 
-        log_paths = sorted(p for p in logs_dir.glob("*.log") if p.is_file())
+        log_paths = discover_log_files_model(logs_dir)
         has_logs_decision = validate_log_file_deletion(logs_busy=False, has_logs=bool(log_paths))
         if not has_logs_decision.valid:
             safe_message(self, has_logs_decision.title or "Logs", has_logs_decision.message)
@@ -4989,24 +4994,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return
 
-        deleted = 0
-        failed: list[str] = []
-        for path in log_paths:
-            try:
-                path.unlink()
-                deleted += 1
-            except OSError as exc:
-                failed.append(f"{path.name}: {exc}")
-
-        if failed:
-            safe_message(
-                self,
-                "Logs",
-                f"Deleted {deleted} log file(s), but {len(failed)} failed.",
-                "\n".join(failed[:20]),
-            )
-        else:
-            safe_message(self, "Logs", f"Deleted {deleted} log file(s).")
+        deleted, failed = delete_log_files_model(log_paths)
+        title, message, details = log_deletion_feedback_model(deleted=deleted, failed=failed)
+        safe_message(self, title, message, details)
 
     def _open_selected_job_output_folder(self) -> None:
         job = self._selected_job()
