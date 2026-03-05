@@ -162,7 +162,7 @@ from queue_core.queue_progress_state import (
     parse_percent_value as parse_percent_value_model,
     queue_progress_split_values as queue_progress_split_values_model,
 )
-from usd_queue_status import (
+from usd_core.usd_queue_status import (
     usd_status_display as usd_status_display_model,
     usd_status_tooltip as usd_status_tooltip_model,
 )
@@ -215,7 +215,7 @@ from rop_metadata import (
     RopInfo,
     apply_rop_info_to_job as apply_rop_info_to_job_model,
 )
-from retained_usd_policy import (
+from usd_core.retained_usd_policy import (
     retained_usd_build_info as retained_usd_build_info_model,
     retained_usd_built_at_text as retained_usd_built_at_text_model,
     retained_usd_hip_stale_reason as retained_usd_hip_stale_reason_model,
@@ -223,7 +223,7 @@ from retained_usd_policy import (
     retained_usd_metadata_path as retained_usd_metadata_path_model,
     retained_usd_status_text as retained_usd_status_text_model,
 )
-from retained_usd_runtime import (
+from usd_core.retained_usd_runtime import (
     clear_retained_usd_runtime as clear_retained_usd_runtime_model,
     delete_retained_usd_folder_for_job as delete_retained_usd_folder_for_job_model,
     is_absolute_retained_usd_path as is_absolute_retained_usd_path_model,
@@ -232,11 +232,11 @@ from retained_usd_runtime import (
     sync_retained_usd_file_state as sync_retained_usd_file_state_model,
     write_retained_usd_metadata as write_retained_usd_metadata_model,
 )
-from retained_usd_panel_state import (
+from usd_core.retained_usd_panel_state import (
     retained_usd_panel_default_fields as retained_usd_panel_default_fields_model,
     single_job_retained_usd_panel_state as single_job_retained_usd_panel_state_model,
 )
-from retained_usd_actions import (
+from usd_core.retained_usd_actions import (
     clear_deleted_retained_usd_runtime as clear_deleted_retained_usd_runtime_model,
     delete_retained_usd_directories as delete_retained_usd_directories_model,
     first_retained_usd_folder as first_retained_usd_folder_model,
@@ -314,10 +314,10 @@ from render_environment_builder import (
     should_delete_existing_retained_usd as should_delete_existing_retained_usd_model,
     should_reuse_existing_usd as should_reuse_existing_usd_model,
 )
-from ui_state_rules import build_ui_state as build_ui_state_model
+from ui_core.ui_state_rules import build_ui_state as build_ui_state_model
 from queue_core.queue_undo_redo import pop_history_for_shortcut as pop_history_for_shortcut_model
 from theme_support import DEFAULT_THEME, build_app_stylesheet, ensure_theme_icons, normalize_theme_colors
-from widgets import AddJobPanel, CleanStepSpinBox, JobPropertiesPanel, PanelFrame, PreferencesDialog, QueueTableItemDelegate, QueueTableWidget, RopListWidget
+from ui_core.widgets import AddJobPanel, CleanStepSpinBox, JobPropertiesPanel, PanelFrame, PreferencesDialog, QueueTableItemDelegate, QueueTableWidget, RopListWidget
 from worker_client import RenderWorkerClient, ScanWorkerClient
 
 

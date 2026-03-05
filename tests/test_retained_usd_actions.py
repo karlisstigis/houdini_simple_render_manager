@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from queue_core.queue_models import RenderJob
-from retained_usd_actions import (
+from usd_core.retained_usd_actions import (
     clear_deleted_retained_usd_runtime,
     delete_retained_usd_directories,
     first_retained_usd_folder,

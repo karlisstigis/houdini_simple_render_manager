@@ -10,7 +10,7 @@ from job_properties_presenter import (
 )
 from job_properties_state import build_job_properties_panel_state
 from queue_core.queue_models import RenderJob
-from retained_usd_panel_state import can_delete_retained_usd, multi_job_retained_usd_panel_state
+from usd_core.retained_usd_panel_state import can_delete_retained_usd, multi_job_retained_usd_panel_state
 
 
 def build_job_properties_state_for_selection(

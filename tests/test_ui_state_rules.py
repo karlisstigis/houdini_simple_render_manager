@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from ui_state_rules import build_ui_state
+from ui_core.ui_state_rules import build_ui_state
 
 
 class UiStateRulesTests(unittest.TestCase):

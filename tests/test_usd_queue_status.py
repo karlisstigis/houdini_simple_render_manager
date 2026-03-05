@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from usd_queue_status import usd_status_display, usd_status_tooltip
+from usd_core.usd_queue_status import usd_status_display, usd_status_tooltip
 
 
 class UsdQueueStatusTests(unittest.TestCase):

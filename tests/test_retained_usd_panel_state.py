@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from retained_usd_panel_state import (
+from usd_core.retained_usd_panel_state import (
     can_delete_retained_usd,
     multi_job_retained_usd_panel_state,
     retained_usd_panel_default_fields,

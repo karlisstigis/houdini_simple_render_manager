@@ -6,7 +6,7 @@ from typing import Any
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from widgets import PanelFrame, QueueTreeItemDelegate, QueueTreeView
+from ui_core.widgets import PanelFrame, QueueTreeItemDelegate, QueueTreeView
 
 
 TREE_KIND_ROLE = QtCore.Qt.ItemDataRole.UserRole + 1
