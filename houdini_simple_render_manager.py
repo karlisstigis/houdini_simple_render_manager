@@ -235,6 +235,18 @@ from queue_selection_helpers import (
     selected_row_from_view_rows as selected_row_from_view_rows_model,
     source_rows_from_view_rows as source_rows_from_view_rows_model,
 )
+from queue_job_paths import (
+    configured_retained_usd_folder_preview as configured_retained_usd_folder_preview_model,
+    job_file_name_from_path as job_file_name_from_path_model,
+    job_rop_name_from_path as job_rop_name_from_path_model,
+    safe_usd_folder_name as safe_usd_folder_name_model,
+)
+from queue_targeting import (
+    selected_job_for_row as selected_job_for_row_model,
+    selection_ids_for_refresh as selection_ids_for_refresh_model,
+    tree_context_target_jobs as tree_context_target_jobs_model,
+)
+from queue_model_text import queue_model_display_text as queue_model_display_text_model
 from queue_refresh_defer import (
     next_pending_refresh_action as next_pending_refresh_action_model,
     pending_refresh_args as pending_refresh_args_model,
@@ -2354,22 +2366,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _job_file_name(job: RenderJob) -> str:
-        path = str(job.spec.hip_path or "").strip()
-        if not path:
-            return "-"
-        return Path(path).name or path
+        return job_file_name_from_path_model(job.spec.hip_path)
 
     @staticmethod
     def _job_rop_name(job: RenderJob) -> str:
-        rop_path = str(job.spec.rop_path or "").strip().rstrip("/")
-        if not rop_path:
-            return "-"
-        return rop_path.split("/")[-1] or rop_path
+        return job_rop_name_from_path_model(job.spec.rop_path)
 
     @staticmethod
     def _safe_usd_folder_name(name: str) -> str:
-        cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(name or "").strip()).strip("_")
-        return cleaned or "rop"
+        return safe_usd_folder_name_model(name)
 
     def _effective_usd_output_directory_mode_for_job(self, job: RenderJob) -> UsdOutputDirectoryMode:
         return UsdOutputDirectoryMode.coerce(job.spec.usd_output_directory_mode)
@@ -2383,21 +2388,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _configured_retained_usd_folder_preview(self, job: RenderJob) -> str:
         mode = self._effective_usd_output_directory_mode_for_job(job)
-        if mode is UsdOutputDirectoryMode.DEFAULT_TEMP:
-            return ""
-        if mode is UsdOutputDirectoryMode.PROJECT_PATH:
-            hip_path = str(job.spec.hip_path or "").strip()
-            if not hip_path:
-                return ""
-            hip_name = Path(hip_path).stem or "hip"
-            base_dir = Path(hip_path).parent / "usd_renders" / self._safe_usd_folder_name(hip_name)
-        else:
-            custom_path = self._effective_usd_output_directory_custom_path_for_job(job)
-            if not custom_path:
-                return ""
-            base_dir = Path(custom_path)
-        rop_name = self._safe_usd_folder_name(self._job_rop_name(job))
-        return str(base_dir / f"{rop_name}_$RENDERID")
+        return configured_retained_usd_folder_preview_model(
+            hip_path=str(job.spec.hip_path or ""),
+            rop_path=str(job.spec.rop_path or ""),
+            mode=mode,
+            custom_path=self._effective_usd_output_directory_custom_path_for_job(job),
+        )
 
     def _device_option_states_for_jobs(
         self,
@@ -2941,12 +2937,7 @@ class MainWindow(QtWidgets.QMainWindow):
         restore_job_online_status_model(job)
 
     def _selection_ids_for_refresh(self, fallback_job_ids: list[str] | None = None) -> list[str] | None:
-        selected_ids = self._selected_job_ids()
-        if selected_ids:
-            return selected_ids
-        if fallback_job_ids:
-            return [job_id for job_id in fallback_job_ids if job_id]
-        return None
+        return selection_ids_for_refresh_model(self._selected_job_ids(), fallback_job_ids)
 
     def _defer_refresh_queue_tree_view(self) -> None:
         QtCore.QTimer.singleShot(0, self._refresh_queue_tree_view)
@@ -2982,11 +2973,12 @@ class MainWindow(QtWidgets.QMainWindow):
         hip_path = str(index.data(TREE_HIP_ROLE) or "").strip()
         rop_path = str(index.data(TREE_ROP_ROLE) or "").strip()
         kind = str(index.data(TREE_KIND_ROLE) or "").strip().lower()
-        if not hip_path:
-            return []
-        if kind == "rop" and rop_path:
-            return [job for job in self.jobs if job.spec.hip_path == hip_path and job.spec.rop_path == rop_path]
-        return [job for job in self.jobs if job.spec.hip_path == hip_path]
+        return tree_context_target_jobs_model(
+            self.jobs,
+            hip_path=hip_path,
+            rop_path=rop_path,
+            kind=kind,
+        )
 
     def _show_queue_tree_context_menu(self, pos: QtCore.QPoint) -> None:
         if not hasattr(self, "queue_tree") or self.queue_tree is None:
@@ -3848,10 +3840,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._load_queue_from_path(path)
 
     def _selected_job(self) -> RenderJob | None:
-        row = self._selected_row()
-        if 0 <= row < len(self.jobs):
-            return self.jobs[row]
-        return None
+        return selected_job_for_row_model(self.jobs, self._selected_row())
 
     def _remove_selected_job(self) -> None:
         rows = self._selected_rows()
@@ -4501,12 +4490,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _queue_model_display_text(self, row: int, column: int) -> str:
         model = getattr(self, "queue_table_model", None)
-        if model is None:
-            return ""
-        index = model.index(row, column)
-        if not index.isValid():
-            return ""
-        return str(index.data(QtCore.Qt.ItemDataRole.DisplayRole) or "").strip()
+        return queue_model_display_text_model(
+            model,
+            row,
+            column,
+            display_role=QtCore.Qt.ItemDataRole.DisplayRole,
+        )
 
     def _apply_queue_cell_edit(self, row: int, col: int, text: str, selected_rows_override: list[int] | None = None) -> bool:
         return apply_queue_cell_edit_model(
