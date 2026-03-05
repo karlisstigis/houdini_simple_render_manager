@@ -6,11 +6,11 @@ from typing import Any
 
 from PySide6 import QtCore
 
-from queue_execution import (
+from queue_core.queue_execution import (
     mark_job_done_without_render as mark_job_done_without_render_model,
     plan_frame_handling as plan_frame_handling_model,
 )
-from queue_models import FrameHandlingMode, JobStatus, RenderJob
+from queue_core.queue_models import FrameHandlingMode, JobStatus, RenderJob
 
 
 def _schedule_job_continuation(window: Any, job: RenderJob, delay_ms: int) -> None:

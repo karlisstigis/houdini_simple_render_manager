@@ -3,13 +3,13 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from queue_job_paths import (
+from queue_core.queue_job_paths import (
     configured_retained_usd_folder_preview,
     job_file_name_from_path,
     job_rop_name_from_path,
     safe_usd_folder_name,
 )
-from queue_models import UsdOutputDirectoryMode
+from queue_core.queue_models import UsdOutputDirectoryMode
 
 
 class QueueJobPathsTests(unittest.TestCase):

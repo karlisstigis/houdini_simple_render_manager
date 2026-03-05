@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from queue_refresh_defer import (
+from queue_core.queue_refresh_defer import (
     next_pending_refresh_action,
     pending_refresh_args,
     should_defer_queue_refresh,

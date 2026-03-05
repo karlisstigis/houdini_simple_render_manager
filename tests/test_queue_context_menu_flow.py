@@ -7,7 +7,7 @@ from flows.queue_context_menu_flow import (
     build_queue_context_menu_availability,
     queue_context_action_key,
 )
-from queue_models import RenderJob
+from queue_core.queue_models import RenderJob
 
 
 class QueueContextMenuFlowTests(unittest.TestCase):

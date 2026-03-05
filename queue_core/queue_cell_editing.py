@@ -3,9 +3,9 @@ from __future__ import annotations
 import traceback
 from typing import Any, Callable
 
-from queue_editing import apply_queue_frame_override_text
-from queue_models import FrameHandlingMode
-from queue_tree_sync import validate_queue_path_value as validate_queue_path_value_model
+from queue_core.queue_editing import apply_queue_frame_override_text
+from queue_core.queue_models import FrameHandlingMode
+from queue_core.queue_tree_sync import validate_queue_path_value as validate_queue_path_value_model
 
 
 def apply_queue_cell_edit(

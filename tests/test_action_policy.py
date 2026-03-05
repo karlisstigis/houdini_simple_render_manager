@@ -17,7 +17,7 @@ from action_policy import (
     is_job_runnable,
     queue_row_status_label,
 )
-from queue_models import JobStatus, RenderJob
+from queue_core.queue_models import JobStatus, RenderJob
 
 
 class ActionPolicyTests(unittest.TestCase):

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Callable
 
-from queue_models import RenderJob
+from queue_core.queue_models import RenderJob
 
 
 def job_time_remaining_display(job: RenderJob, terminal_statuses: set[object]) -> str:

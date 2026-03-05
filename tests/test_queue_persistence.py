@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from queue_models import DeviceOverrideMode, FrameHandlingMode, JobStatus, RenderJob, UsdOutputDirectoryMode
-from queue_persistence import (
+from queue_core.queue_models import DeviceOverrideMode, FrameHandlingMode, JobStatus, RenderJob, UsdOutputDirectoryMode
+from queue_core.queue_persistence import (
     apply_job_order,
     apply_job_states,
     insert_jobs_from_entries,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from queue_history import (
+from queue_core.queue_history import (
     apply_history_command,
     bounded_undo_stack,
     history_command_candidate_ids,

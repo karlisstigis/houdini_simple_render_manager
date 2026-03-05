@@ -8,7 +8,7 @@ from flows.app_preferences_flow import (
     dialog_runtime_defaults,
     parse_preferences_payload,
 )
-from queue_models import DeviceOverrideMode, UsdOutputDirectoryMode
+from queue_core.queue_models import DeviceOverrideMode, UsdOutputDirectoryMode
 
 
 class AppPreferencesFlowTests(unittest.TestCase):

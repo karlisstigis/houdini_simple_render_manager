@@ -9,7 +9,7 @@ from job_properties_presenter import (
     should_show_custom_devices,
 )
 from job_properties_state import build_job_properties_panel_state
-from queue_models import RenderJob
+from queue_core.queue_models import RenderJob
 from retained_usd_panel_state import can_delete_retained_usd, multi_job_retained_usd_panel_state
 
 

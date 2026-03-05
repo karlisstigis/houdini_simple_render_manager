@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from queue_models import JobStatus, RenderJob
+from queue_core.queue_models import JobStatus, RenderJob
 
 
 def write_queue_snapshot(

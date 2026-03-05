@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from queue_editing import apply_queue_path_text
-from queue_models import RenderJob
+from queue_core.queue_editing import apply_queue_path_text
+from queue_core.queue_models import RenderJob
 from rop_metadata import RopInfo, apply_rop_info_to_job as apply_rop_info_to_job_model
 
 

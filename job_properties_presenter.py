@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from queue_models import DeviceOverrideMode, RenderJob
+from queue_core.queue_models import DeviceOverrideMode, RenderJob
 
 
 def selected_jobs_summary(

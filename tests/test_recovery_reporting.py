@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from queue_models import JobStatus, RenderJob
+from queue_core.queue_models import JobStatus, RenderJob
 from recovery_reporting import build_startup_recovery_summary
 
 

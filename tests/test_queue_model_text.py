@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from queue_model_text import queue_model_display_text
+from queue_core.queue_model_text import queue_model_display_text
 
 
 class _IndexStub:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from queue_models import JobStatus, RenderJob
+from queue_core.queue_models import JobStatus, RenderJob
 from flows.queue_reload_flow import (
     RELOAD_ALL_EMPTY_MESSAGE,
     RELOAD_ALL_NOTIFICATION_LABEL,

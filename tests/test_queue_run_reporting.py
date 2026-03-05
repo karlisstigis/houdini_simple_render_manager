@@ -4,9 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from queue_models import JobStatus, RenderJob
-from queue_persistence import save_queue_payload
-from queue_run_reporting import build_queue_run_summary, write_queue_snapshot
+from queue_core.queue_models import JobStatus, RenderJob
+from queue_core.queue_persistence import save_queue_payload
+from queue_core.queue_run_reporting import build_queue_run_summary, write_queue_snapshot
 
 
 class QueueRunReportingTests(unittest.TestCase):

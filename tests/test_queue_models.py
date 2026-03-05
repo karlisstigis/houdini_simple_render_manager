@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from queue_models import DeviceOverrideMode, FrameHandlingMode, JobStatus, RenderJob, UsdOutputDirectoryMode
+from queue_core.queue_models import DeviceOverrideMode, FrameHandlingMode, JobStatus, RenderJob, UsdOutputDirectoryMode
 
 
 class QueueModelTests(unittest.TestCase):

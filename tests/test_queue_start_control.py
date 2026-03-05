@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from queue_models import JobStatus, RenderJob
-from queue_start_control import blocked_start_title, should_set_selected_rerun_status, start_queue_runnable_state
+from queue_core.queue_models import JobStatus, RenderJob
+from queue_core.queue_start_control import blocked_start_title, should_set_selected_rerun_status, start_queue_runnable_state
 
 
 class QueueStartControlTests(unittest.TestCase):

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from houdini_simple_render_manager import MainWindow
-from queue_models import DeviceOverrideMode, JobStatus, RenderJob, UsdOutputDirectoryMode
+from queue_core.queue_models import DeviceOverrideMode, JobStatus, RenderJob, UsdOutputDirectoryMode
 
 
 class RetainedUsdPolicyTests(unittest.TestCase):

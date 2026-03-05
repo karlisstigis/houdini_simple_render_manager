@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from queue_models import RenderJob
+from queue_core.queue_models import RenderJob
 
 
 @dataclass

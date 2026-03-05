@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from queue_file_controller import QueueFileController, QueueFileControllerHooks
+from queue_core.queue_file_controller import QueueFileController, QueueFileControllerHooks
 
 
 class QueueFileControllerTests(unittest.TestCase):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from queue_header_grouping import (
+from queue_core.queue_header_grouping import (
     is_valid_queue_header_grouping,
     queue_column_widths_from_data,
     queue_header_visual_order,

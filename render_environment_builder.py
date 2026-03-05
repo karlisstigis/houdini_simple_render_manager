@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from queue_models import DeviceOverrideMode
+from queue_core.queue_models import DeviceOverrideMode
 
 
 def parse_device_selection(selection: str) -> tuple[bool, list[str]]:

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from queue_models import JobStatus, RenderJob
-from queue_tree_sync import refresh_jobs_from_rop_metadata
+from queue_core.queue_models import JobStatus, RenderJob
+from queue_core.queue_tree_sync import refresh_jobs_from_rop_metadata
 from rop_metadata import RopInfo
 
 

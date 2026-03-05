@@ -11,7 +11,7 @@ from job_properties_actions import (
     usd_output_directory_custom_path_edit_spec,
     usd_output_directory_mode_edit_spec,
 )
-from queue_models import DeviceOverrideMode, RenderJob, UsdOutputDirectoryMode
+from queue_core.queue_models import DeviceOverrideMode, RenderJob, UsdOutputDirectoryMode
 
 
 class JobPropertiesActionsTests(unittest.TestCase):

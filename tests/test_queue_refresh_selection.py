@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from queue_refresh_selection import clamped_select_row, preserved_selection, target_selection
+from queue_core.queue_refresh_selection import clamped_select_row, preserved_selection, target_selection
 
 
 class QueueRefreshSelectionTests(unittest.TestCase):

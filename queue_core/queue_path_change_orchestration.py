@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from queue_models import RenderJob
-from queue_tree_sync import (
+from queue_core.queue_models import RenderJob
+from queue_core.queue_tree_sync import (
     apply_hip_path_change as apply_hip_path_change_model,
     apply_rop_path_change as apply_rop_path_change_model,
 )

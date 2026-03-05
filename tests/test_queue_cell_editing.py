@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from queue_cell_editing import apply_queue_cell_edit
-from queue_models import FrameHandlingMode, RenderJob
+from queue_core.queue_cell_editing import apply_queue_cell_edit
+from queue_core.queue_models import FrameHandlingMode, RenderJob
 
 
 class _QueueTableModelStub:

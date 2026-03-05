@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from queue_models import JobStatus
+from queue_core.queue_models import JobStatus
 
 
 @dataclass(frozen=True)

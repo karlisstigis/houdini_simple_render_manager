@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable
 
-from queue_models import RenderJob
+from queue_core.queue_models import RenderJob
 
 
 @dataclass

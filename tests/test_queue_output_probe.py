@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from queue_output_probe import initial_probe_path, needs_pattern_refresh, path_exists_nonempty
+from queue_core.queue_output_probe import initial_probe_path, needs_pattern_refresh, path_exists_nonempty
 
 
 class QueueOutputProbeTests(unittest.TestCase):

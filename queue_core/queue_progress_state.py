@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from queue_models import JobStatus, RenderJob
+from queue_core.queue_models import JobStatus, RenderJob
 
 
 def job_phase_display(job: RenderJob) -> str:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from queue_output_paths import (
+from queue_core.queue_output_paths import (
     frame_sequence_path_for_frame,
     normalize_output_display_path,
     output_folder_from_value,

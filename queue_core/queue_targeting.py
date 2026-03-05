@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from queue_models import RenderJob
+from queue_core.queue_models import RenderJob
 
 
 def selection_ids_for_refresh(

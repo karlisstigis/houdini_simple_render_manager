@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from queue_models import RenderJob
+from queue_core.queue_models import RenderJob
 
 
 def enqueue_path_sync_task(pending_tasks: list[dict[str, Any]], task: dict[str, Any]) -> None:

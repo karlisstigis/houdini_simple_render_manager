@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6 import QtCore
 
-from queue_models import DeviceOverrideMode, RenderJob
+from queue_core.queue_models import DeviceOverrideMode, RenderJob
 from render_session import RenderSessionController, RenderSessionHooks
 
 

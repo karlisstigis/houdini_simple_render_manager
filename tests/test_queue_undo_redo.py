@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from queue_undo_redo import can_pop_history_for_shortcut, pop_history_for_shortcut
+from queue_core.queue_undo_redo import can_pop_history_for_shortcut, pop_history_for_shortcut
 
 
 class QueueUndoRedoTests(unittest.TestCase):

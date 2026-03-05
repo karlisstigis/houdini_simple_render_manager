@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from flows.job_properties_panel_flow import build_job_properties_state_for_selection
-from queue_models import DeviceOverrideMode, RenderJob
+from queue_core.queue_models import DeviceOverrideMode, RenderJob
 
 
 def _mixed_value(values: list[Any]) -> tuple[bool, Any]:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from queue_selection_helpers import mixed_value, selected_row_from_view_rows, source_rows_from_view_rows
+from queue_core.queue_selection_helpers import mixed_value, selected_row_from_view_rows, source_rows_from_view_rows
 
 
 class QueueSelectionHelpersTests(unittest.TestCase):

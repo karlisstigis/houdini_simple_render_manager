@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from queue_models import JobStatus, RenderJob
+from queue_core.queue_models import JobStatus, RenderJob
 
 
 def clear_job_resume_runtime_state(job: RenderJob) -> None:

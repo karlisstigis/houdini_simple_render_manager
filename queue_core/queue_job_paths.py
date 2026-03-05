@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from queue_models import UsdOutputDirectoryMode
+from queue_core.queue_models import UsdOutputDirectoryMode
 
 
 def job_file_name_from_path(hip_path: str) -> str:

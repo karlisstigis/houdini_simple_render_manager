@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from queue_models import RenderJob
-from queue_path_sync_lock import (
+from queue_core.queue_models import RenderJob
+from queue_core.queue_path_sync_lock import (
     advance_path_sync_overlay,
     begin_path_sync_lock,
     end_path_sync_lock,

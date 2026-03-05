@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Callable
 
 from atomic_io import write_json_atomic
-from queue_models import JobStatus, RenderJob
+from queue_core.queue_models import JobStatus, RenderJob
 
 
 def selected_retained_usd_paths(

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from queue_models import RenderJob
-from queue_targeting import (
+from queue_core.queue_models import RenderJob
+from queue_core.queue_targeting import (
     current_job_by_id,
     job_row_by_id,
     selected_job_for_row,

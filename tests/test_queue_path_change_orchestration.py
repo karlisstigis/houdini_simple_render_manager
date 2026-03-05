@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from queue_models import JobStatus, RenderJob
-from queue_path_change_orchestration import (
+from queue_core.queue_models import JobStatus, RenderJob
+from queue_core.queue_path_change_orchestration import (
     affected_job_ids_for_hip_path_change,
     affected_job_ids_for_rop_path_change,
     apply_hip_path_change_immediately,

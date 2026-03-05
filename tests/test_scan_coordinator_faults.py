@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from queue_models import RenderJob
+from queue_core.queue_models import RenderJob
 from scan_coordinator import ScanCoordinator, ScanCoordinatorHooks
 
 

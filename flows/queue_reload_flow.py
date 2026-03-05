@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from queue_models import RenderJob
+from queue_core.queue_models import RenderJob
 
 
 RELOAD_ALL_EMPTY_MESSAGE = "No jobs to reload from file."

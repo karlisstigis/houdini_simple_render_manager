@@ -4,8 +4,8 @@ import unittest
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from queue_models import JobStatus, RenderJob
-from queue_table_model import (
+from queue_core.queue_models import JobStatus, RenderJob
+from queue_core.queue_table_model import (
     DISPLAY_STATUS_ROLE,
     EDITABLE_ROLE,
     OVERRIDE_RANGE_ROLE,

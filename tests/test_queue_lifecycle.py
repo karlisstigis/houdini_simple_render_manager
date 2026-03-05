@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from queue_lifecycle import (
+from queue_core.queue_lifecycle import (
     QueueLifecycleState,
     decide_next_job,
     evaluate_start_request,
@@ -11,7 +11,7 @@ from queue_lifecycle import (
     with_queue_started,
     with_stop_requested,
 )
-from queue_models import JobStatus, RenderJob
+from queue_core.queue_models import JobStatus, RenderJob
 
 
 class QueueLifecycleTests(unittest.TestCase):

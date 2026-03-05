@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Iterable
 
-from queue_models import RenderJob
+from queue_core.queue_models import RenderJob
 
 
 def selected_job_log_path(job: RenderJob | None) -> Path | None:

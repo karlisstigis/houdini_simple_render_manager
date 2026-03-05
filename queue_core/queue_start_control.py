@@ -19,6 +19,6 @@ def should_set_selected_rerun_status(selected_job) -> bool:
         return False
     status = getattr(getattr(selected_job, "runtime", None), "status", None)
     # Imported lazily to avoid circular import here.
-    from queue_models import JobStatus
+    from queue_core.queue_models import JobStatus
 
     return status not in {JobStatus.RUNNING, JobStatus.QUEUED}

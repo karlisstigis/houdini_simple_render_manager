@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from queue_models import DeviceOverrideMode, RenderJob, UsdOutputDirectoryMode
+from queue_core.queue_models import DeviceOverrideMode, RenderJob, UsdOutputDirectoryMode
 from theme_support import normalize_theme_colors
 
 

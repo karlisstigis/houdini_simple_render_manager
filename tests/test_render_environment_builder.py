@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from queue_models import DeviceOverrideMode
+from queue_core.queue_models import DeviceOverrideMode
 from render_environment_builder import (
     apply_device_env,
     apply_retained_usd_env,

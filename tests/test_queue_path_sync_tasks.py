@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from queue_models import JobStatus, RenderJob
-from queue_path_sync_tasks import (
+from queue_core.queue_models import JobStatus, RenderJob
+from queue_core.queue_path_sync_tasks import (
     enqueue_path_sync_task,
     run_next_path_sync_task,
     should_schedule_next_path_sync_task,

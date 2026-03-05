@@ -8,7 +8,7 @@ from job_properties_presenter import (
     selected_jobs_summary,
     should_show_custom_devices,
 )
-from queue_models import DeviceOverrideMode, RenderJob
+from queue_core.queue_models import DeviceOverrideMode, RenderJob
 
 
 class JobPropertiesPresenterTests(unittest.TestCase):

@@ -10,7 +10,7 @@ from log_panel_actions import (
     log_deletion_feedback,
     selected_job_log_path,
 )
-from queue_models import RenderJob
+from queue_core.queue_models import RenderJob
 
 
 class LogPanelActionsTests(unittest.TestCase):

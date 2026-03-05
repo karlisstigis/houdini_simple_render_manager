@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from queue_frame_scan import (
+from queue_core.queue_frame_scan import (
     compress_missing_frames_to_runs,
     first_missing_frame_and_contiguous_done,
     missing_frame_runs_and_existing_count,

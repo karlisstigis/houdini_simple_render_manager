@@ -5,7 +5,7 @@ from typing import Any, Callable
 
 from PySide6 import QtCore, QtGui
 
-from queue_models import RenderJob
+from queue_core.queue_models import RenderJob
 
 
 DISPLAY_STATUS_ROLE = QtCore.Qt.ItemDataRole.UserRole + 20

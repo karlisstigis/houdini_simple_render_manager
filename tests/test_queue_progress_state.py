@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from queue_models import JobStatus, RenderJob
-from queue_progress_state import job_phase_display, parse_percent_value, queue_progress_split_values
+from queue_core.queue_models import JobStatus, RenderJob
+from queue_core.queue_progress_state import job_phase_display, parse_percent_value, queue_progress_split_values
 
 
 class QueueProgressStateTests(unittest.TestCase):

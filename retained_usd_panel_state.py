@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from queue_models import RenderJob
+from queue_core.queue_models import RenderJob
 
 
 def retained_usd_panel_default_fields() -> dict[str, Any]:

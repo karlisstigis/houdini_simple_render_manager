@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from action_policy import can_scan_hip
-from queue_models import RenderJob
+from queue_core.queue_models import RenderJob
 from rop_metadata import RopInfo, apply_rop_info_to_job as apply_rop_info_to_job_model, rop_info_from_scan_record as rop_info_from_scan_record_model
 
 
