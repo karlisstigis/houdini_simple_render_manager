@@ -24,8 +24,15 @@ from action_policy import (
     can_resume_job_from_output,
     is_job_runnable,
 )
+from app_preferences_flow import (
+    dialog_device_defaults as dialog_device_defaults_model,
+    dialog_experimental_flags as dialog_experimental_flags_model,
+    dialog_runtime_defaults as dialog_runtime_defaults_model,
+    parse_preferences_payload as parse_preferences_payload_model,
+)
 from atomic_io import read_json_file, write_json_atomic
 from diagnostics import DiagnosticsSnapshot, build_diagnostics_report
+from diagnostics_snapshot_builder import build_diagnostics_snapshot as build_diagnostics_snapshot_model
 from houdini_service import (
     build_render_preflight_script as build_render_preflight_script_model,
     ensure_husk_hook_files as ensure_husk_hook_files_model,
@@ -124,6 +131,7 @@ from queue_output_paths import (
     normalize_output_display_path as normalize_output_display_path_model,
     output_folder_from_value as output_folder_from_value_model,
 )
+from preview_paths import resolve_job_preview_path as resolve_job_preview_path_model
 from queue_frame_scan import (
     first_missing_frame_and_contiguous_done as first_missing_frame_and_contiguous_done_model,
     missing_frame_runs_and_existing_count as missing_frame_runs_and_existing_count_model,
@@ -1855,22 +1863,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_hbatch_path(),
             self._current_player_path(),
             dict(self.theme),
-            {
-                "chunking_enabled": self._default_chunking_enabled(),
-                "chunk_size": self._default_chunk_size(),
-                "retry_count": self._default_retry_count(),
-                "retry_delay": self._default_retry_delay(),
-            },
-            {
-                "chunking": self._experimental_chunking_enabled(),
-            },
-            {
-                "mode": self._default_device_mode().value,
-                "selection": self._default_device_selection(),
-                "retain_built_usd": self._default_retain_built_usd(),
-                "usd_output_directory_mode": self._default_usd_output_directory_mode().value,
-                "usd_output_directory_custom_path": self._default_usd_output_directory_custom_path(),
-            },
+            dialog_runtime_defaults_model(
+                chunking_enabled=self._default_chunking_enabled(),
+                chunk_size=self._default_chunk_size(),
+                retry_count=self._default_retry_count(),
+                retry_delay=self._default_retry_delay(),
+            ),
+            dialog_experimental_flags_model(
+                chunking_enabled=self._experimental_chunking_enabled(),
+            ),
+            dialog_device_defaults_model(
+                mode=self._default_device_mode(),
+                selection=self._default_device_selection(),
+                retain_built_usd=self._default_retain_built_usd(),
+                usd_output_directory_mode=self._default_usd_output_directory_mode(),
+                usd_output_directory_custom_path=self._default_usd_output_directory_custom_path(),
+            ),
             str(self.config.logs_dir),
             discover_hbatch,
             safe_message,
@@ -1883,32 +1891,24 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg.exec()
 
     def _apply_preferences_from_dialog(self, payload: dict) -> None:
-        hbatch_path = str(payload.get("hbatch_path", "")).strip()
-        player_path = str(payload.get("player_path", "")).strip()
-        theme = payload.get("theme", {})
-        runtime_defaults = payload.get("runtime_defaults", {})
-        experimental_flags = payload.get("experimental_flags", {})
-        device_defaults = payload.get("device_defaults", {})
+        parsed = parse_preferences_payload_model(payload)
+        hbatch_path = str(parsed.get("hbatch_path", "") or "").strip()
+        player_path = str(parsed.get("player_path", "") or "").strip()
+        theme = parsed.get("theme")
+        runtime_defaults = parsed.get("runtime_defaults")
+        device_defaults = parsed.get("device_defaults")
+        experimental_chunking_enabled = parsed.get("experimental_chunking_enabled")
         self._hbatch_path = hbatch_path
         self._save_hbatch_path()
         self.config.set("player_path", player_path)
-        if isinstance(theme, dict):
-            self.theme = normalize_theme_colors(theme)
+        if theme is not None:
+            self.theme = theme
             self.config.save_theme(self.theme)
             self._apply_theme()
-        if isinstance(experimental_flags, dict):
-            self.config.set("experimental_chunking_enabled", bool(experimental_flags.get("chunking", False)))
-        if isinstance(runtime_defaults, dict):
-            try:
-                chunking_enabled = bool(runtime_defaults.get("chunking_enabled", False))
-                chunk_size = max(1, int(runtime_defaults.get("chunk_size", 10)))
-                retry_count = max(0, int(runtime_defaults.get("retry_count", 1)))
-                retry_delay = max(0, int(runtime_defaults.get("retry_delay", 5)))
-            except (TypeError, ValueError):
-                chunking_enabled = False
-                chunk_size = 10
-                retry_count = 1
-                retry_delay = 5
+        if experimental_chunking_enabled is not None:
+            self.config.set("experimental_chunking_enabled", bool(experimental_chunking_enabled))
+        if runtime_defaults is not None:
+            chunking_enabled, chunk_size, retry_count, retry_delay = runtime_defaults
             self.config.set("default_chunking_enabled", chunking_enabled)
             self.config.set("default_chunk_size", chunk_size)
             self.config.set("default_retry_count", retry_count)
@@ -1922,12 +1922,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, "spin_retry_delay"):
                 self.spin_retry_delay.setValue(retry_delay)
             self._refresh_ui_state()
-        if isinstance(device_defaults, dict):
-            mode = DeviceOverrideMode.coerce(device_defaults.get("mode"))
-            selection = RenderJob.normalize_device_selection(device_defaults.get("selection", ""))
-            retain_built_usd = bool(device_defaults.get("retain_built_usd", False))
-            usd_output_directory_mode = UsdOutputDirectoryMode.coerce(device_defaults.get("usd_output_directory_mode"))
-            usd_output_directory_custom_path = str(device_defaults.get("usd_output_directory_custom_path", "") or "").strip()
+        if device_defaults is not None:
+            mode, selection, retain_built_usd, usd_output_directory_mode, usd_output_directory_custom_path = (
+                device_defaults
+            )
             self.config.set("default_device_mode", mode.value)
             self.config.set("default_device_selection", selection)
             self.config.set("default_retain_built_usd", retain_built_usd)
@@ -4342,7 +4340,7 @@ class MainWindow(QtWidgets.QMainWindow):
         status_text = ""
         if hasattr(self, "status_label") and self.status_label is not None:
             status_text = str(self.status_label.text() or "")
-        return DiagnosticsSnapshot(
+        return build_diagnostics_snapshot_model(
             app_name=APP_NAME,
             queue_path=str(self._current_queue_file_path()),
             logs_dir=str(self.config.logs_dir),
@@ -4898,26 +4896,12 @@ class MainWindow(QtWidgets.QMainWindow):
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
 
     def _job_preview_path(self, job: RenderJob) -> Path | None:
-        candidate = str(job.view.out_file_sample_path or "").strip()
-        if not candidate or candidate.lower() == "ip":
-            return None
-
-        direct_path = Path(candidate)
-        if direct_path.exists() and direct_path.is_file():
-            return direct_path
-
         resolved = self._resolve_job_range_for_execution(job, mutate_job=False)
-        if resolved is not None:
-            start_frame, end_frame, step = resolved
-            for frame in range(start_frame, end_frame + 1, step):
-                seq_path = self._frame_sequence_path_for_frame(candidate, frame)
-                if seq_path is not None and seq_path.exists() and seq_path.is_file():
-                    return seq_path
-            fallback_seq = self._frame_sequence_path_for_frame(candidate, start_frame)
-            if fallback_seq is not None:
-                return fallback_seq
-
-        return direct_path if direct_path.suffix else None
+        return resolve_job_preview_path_model(
+            candidate=str(job.view.out_file_sample_path or ""),
+            resolved_range=resolved,
+            frame_path_for_frame=self._frame_sequence_path_for_frame,
+        )
 
     def _preview_job(self, job: RenderJob) -> None:
         preview_path = self._job_preview_path(job)
