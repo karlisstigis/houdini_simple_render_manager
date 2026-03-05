@@ -269,6 +269,22 @@ from queue_start_control import (
     should_set_selected_rerun_status as should_set_selected_rerun_status_model,
     start_queue_runnable_state as start_queue_runnable_state_model,
 )
+from render_environment_builder import (
+    apply_device_env as apply_device_env_model,
+    apply_retained_usd_env as apply_retained_usd_env_model,
+    available_gpu_ids as available_gpu_ids_model,
+    base_render_environment as base_render_environment_model,
+    parse_device_selection as parse_device_selection_model,
+    should_delete_existing_retained_usd as should_delete_existing_retained_usd_model,
+    should_reuse_existing_usd as should_reuse_existing_usd_model,
+)
+from job_properties_presenter import (
+    has_active_or_locked_jobs as has_active_or_locked_jobs_model,
+    selected_jobs_editable as selected_jobs_editable_model,
+    selected_jobs_summary as selected_jobs_summary_model,
+    should_show_custom_devices as should_show_custom_devices_model,
+)
+from ui_state_rules import build_ui_state as build_ui_state_model
 from queue_undo_redo import pop_history_for_shortcut as pop_history_for_shortcut_model
 from theme_support import DEFAULT_THEME, build_app_stylesheet, ensure_theme_icons, normalize_theme_colors
 from widgets import AddJobPanel, CleanStepSpinBox, JobPropertiesPanel, PanelFrame, PreferencesDialog, QueueTableItemDelegate, QueueTableWidget, RopListWidget
@@ -2246,31 +2262,27 @@ class MainWindow(QtWidgets.QMainWindow):
         mode = self._effective_device_mode_for_job(job)
         selection = self._effective_device_selection_for_job(job)
         self._sync_retained_usd_file_state(job)
-        selected_tokens = [part.strip().lower() for part in str(selection or "").split(",") if part.strip()]
-        cpu_selected = "cpu" in selected_tokens
-        selected_gpu_ids = [part for part in selected_tokens if part.isdigit()]
-        all_gpu_ids = [str(device.get("id", "") or "") for device in self._available_render_devices() if str(device.get("id", "") or "").isdigit()]
+        cpu_selected, selected_gpu_ids = parse_device_selection_model(selection)
+        all_gpu_ids = available_gpu_ids_model(self._available_render_devices())
         single_process_render = self._single_process_render_enabled_for_job(job)
         retain_usd_enabled = bool(job.spec.retain_built_usd) and single_process_render
-        env: dict[str, str] = {
-            "HSRM_DEVICE_MODE": mode.value,
-            "HSRM_DEVICE_SELECTION": selection,
-            "HSRM_DEVICE_INCLUDE_CPU": "1" if cpu_selected else "0",
-            "HSRM_RENDER_ALL_FRAMES_SINGLE_PROCESS": "1" if single_process_render else "0",
-            "HSRM_RETAIN_USD_ENABLED": "1" if retain_usd_enabled else "0",
-            "HSRM_RETAIN_USD_HELPER_PATH": str(self._retained_usd_helper_path()),
-        }
+        env = base_render_environment_model(
+            mode=mode,
+            selection=selection,
+            cpu_selected=cpu_selected,
+            single_process_render=single_process_render,
+            retain_usd_enabled=retain_usd_enabled,
+            retained_usd_helper_path=self._retained_usd_helper_path(),
+        )
         if retain_usd_enabled:
             planned_build_range = self._current_retained_usd_build_range(job)
             output_path = str(job.runtime.retained_usd_path or "").strip()
             configured_output_dir = self._configured_retained_usd_folder_preview(job)
             invalid_reason = self._retained_usd_invalid_reason(job)
-            should_delete_existing = bool(
-                output_path
-                and (
-                    not bool(job.spec.reuse_retained_usd)
-                    or bool(invalid_reason)
-                )
+            should_delete_existing = should_delete_existing_retained_usd_model(
+                output_path=output_path,
+                reuse_retained_usd=bool(job.spec.reuse_retained_usd),
+                invalid_reason=invalid_reason,
             )
             if should_delete_existing:
                 self._delete_retained_usd_folder_for_job(job)
@@ -2280,19 +2292,19 @@ class MainWindow(QtWidgets.QMainWindow):
                     job.runtime.retained_usd_build_end_frame = int(planned_build_range[1])
                     job.runtime.retained_usd_build_step = int(planned_build_range[2])
                 output_path = str(job.runtime.retained_usd_path or "").strip()
-            reuse_existing = bool(
-                job.spec.reuse_retained_usd
-                and output_path
-                and job.runtime.retained_usd_reusable
-                and Path(output_path).exists()
-                and not invalid_reason
+            reuse_existing = should_reuse_existing_usd_model(
+                reuse_retained_usd=bool(job.spec.reuse_retained_usd),
+                output_path=output_path,
+                retained_reusable=bool(job.runtime.retained_usd_reusable),
+                invalid_reason=invalid_reason,
             )
             job.runtime.retained_usd_metadata_pending_write = bool(not reuse_existing)
-            if reuse_existing and output_path:
-                env["HSRM_RETAIN_USD_OUTPUT_PATH"] = output_path
-            elif configured_output_dir:
-                env["HSRM_RETAIN_USD_OUTPUT_DIR"] = configured_output_dir
-            env["HSRM_REUSE_EXISTING_USD"] = "1" if reuse_existing else "0"
+            apply_retained_usd_env_model(
+                env,
+                output_path=output_path,
+                configured_output_dir=configured_output_dir,
+                reuse_existing=reuse_existing,
+            )
             if reuse_existing:
                 stale_reason = self._retained_usd_stale_reason(job)
                 if stale_reason:
@@ -2301,20 +2313,13 @@ class MainWindow(QtWidgets.QMainWindow):
             elif invalid_reason:
                 self._append_log("Stderr", f"[RetainUSD] {invalid_reason}\n")
                 self._append_notification_message(invalid_reason, "warning")
-        if mode is DeviceOverrideMode.CPU:
-            env["HOUDINI_OCL_DEVICETYPE"] = "CPU"
-            env["CUDA_VISIBLE_DEVICES"] = "-1"
-        elif mode is DeviceOverrideMode.ALL_GPUS:
-            env["HOUDINI_OCL_DEVICETYPE"] = "GPU"
-            if all_gpu_ids:
-                env["CUDA_VISIBLE_DEVICES"] = ",".join(all_gpu_ids)
-        elif mode is DeviceOverrideMode.SPECIFIC_GPUS:
-            if selected_gpu_ids:
-                env["HOUDINI_OCL_DEVICETYPE"] = "GPU"
-                env["CUDA_VISIBLE_DEVICES"] = ",".join(selected_gpu_ids)
-            elif cpu_selected:
-                env["HOUDINI_OCL_DEVICETYPE"] = "CPU"
-                env["CUDA_VISIBLE_DEVICES"] = "-1"
+        apply_device_env_model(
+            env,
+            mode=mode,
+            all_gpu_ids=all_gpu_ids,
+            selected_gpu_ids=selected_gpu_ids,
+            cpu_selected=cpu_selected,
+        )
         return env
 
     def _queue_proxy_model(self) -> QueueFilterProxyModel | None:
@@ -2646,64 +2651,70 @@ class MainWindow(QtWidgets.QMainWindow):
             panel.set_state(self._job_properties_panel_default_state())
             return
 
-        selected_count = len(selected_jobs)
-        mixed_name, first_name = self._mixed_value([job.display_name() for job in selected_jobs])
-        mixed_file, first_file = self._mixed_value([self._job_file_name(job) for job in selected_jobs])
-        mixed_rop, first_rop = self._mixed_value([self._job_rop_name(job) for job in selected_jobs])
-        mixed_device_mode, first_device_mode = self._mixed_value([job.spec.device_override_mode.value for job in selected_jobs])
-        mixed_single_process, first_single_process = self._mixed_value([bool(job.spec.render_all_frames_single_process) for job in selected_jobs])
-        mixed_retain, first_retain = self._mixed_value([bool(job.spec.retain_built_usd) for job in selected_jobs])
-        mixed_reuse, first_reuse = self._mixed_value([bool(job.spec.reuse_retained_usd) for job in selected_jobs])
-        mixed_usd_output_mode, first_usd_output_mode = self._mixed_value([job.spec.usd_output_directory_mode.value for job in selected_jobs])
-        mixed_usd_output_custom_path, first_usd_output_custom_path = self._mixed_value([str(job.spec.usd_output_directory_custom_path or "") for job in selected_jobs])
+        summary = selected_jobs_summary_model(
+            selected_jobs,
+            mixed_value=self._mixed_value,
+            job_file_name=self._job_file_name,
+            job_rop_name=self._job_rop_name,
+        )
         retained_usd_state: dict[str, Any]
         retained_paths: list[Path] = []
-        if selected_count == 1:
+        if summary["selected_count"] == 1:
             retained_usd_state = self._single_job_retained_usd_panel_state(selected_jobs[0])
         else:
             retained_paths = self._selected_retained_usd_paths()
             retained_usd_state = multi_job_retained_usd_panel_state_model(retained_paths)
 
-        editable = all(
-            can_edit_job(job, is_active_job=self._is_active_job(job), is_locked=self._is_job_path_sync_locked(job)).allowed
-            for job in selected_jobs
+        editable = selected_jobs_editable_model(
+            selected_jobs,
+            can_edit_job=lambda job: can_edit_job(
+                job,
+                is_active_job=self._is_active_job(job),
+                is_locked=self._is_job_path_sync_locked(job),
+            ).allowed,
         )
-        current_device_mode = DeviceOverrideMode.coerce(first_device_mode)
-        show_custom_devices = current_device_mode is DeviceOverrideMode.SPECIFIC_GPUS and not mixed_device_mode
+        show_custom_devices = should_show_custom_devices_model(
+            mixed_device_mode=bool(summary["mixed_device_mode"]),
+            first_device_mode=str(summary["first_device_mode"] or ""),
+        )
         can_delete = can_delete_retained_usd_model(
-            selected_count=selected_count,
+            selected_count=int(summary["selected_count"]),
             retained_state_can_open=bool(retained_usd_state["can_open"]),
             retained_paths_present=bool(retained_paths),
-            has_active_or_locked_job=any(self._is_active_job(job) or self._is_job_path_sync_locked(job) for job in selected_jobs),
+            has_active_or_locked_job=has_active_or_locked_jobs_model(
+                selected_jobs,
+                is_active_job=self._is_active_job,
+                is_locked_job=self._is_job_path_sync_locked,
+            ),
         )
 
         panel.set_state(
             build_job_properties_panel_state_model(
-                mixed_name=mixed_name,
-                first_name=first_name,
-                mixed_file=mixed_file,
-                first_file=first_file,
-                mixed_rop=mixed_rop,
-                first_rop=first_rop,
+                mixed_name=bool(summary["mixed_name"]),
+                first_name=summary["first_name"],
+                mixed_file=bool(summary["mixed_file"]),
+                first_file=summary["first_file"],
+                mixed_rop=bool(summary["mixed_rop"]),
+                first_rop=summary["first_rop"],
                 editable=editable,
-                mixed_device_mode=mixed_device_mode,
-                first_device_mode=first_device_mode,
+                mixed_device_mode=bool(summary["mixed_device_mode"]),
+                first_device_mode=str(summary["first_device_mode"] or ""),
                 show_custom_devices=show_custom_devices,
                 device_options=self._device_option_states_for_jobs(
                     selected_jobs,
                     show_custom_devices=show_custom_devices,
                     editable=editable,
                 ),
-                mixed_single_process=mixed_single_process,
-                first_single_process=bool(first_single_process),
-                mixed_retain=mixed_retain,
-                first_retain=bool(first_retain),
-                mixed_reuse=mixed_reuse,
-                first_reuse=bool(first_reuse),
-                mixed_usd_output_mode=mixed_usd_output_mode,
-                first_usd_output_mode=first_usd_output_mode,
-                mixed_usd_output_custom_path=mixed_usd_output_custom_path,
-                first_usd_output_custom_path=str(first_usd_output_custom_path or ""),
+                mixed_single_process=bool(summary["mixed_single_process"]),
+                first_single_process=bool(summary["first_single_process"]),
+                mixed_retain=bool(summary["mixed_retain"]),
+                first_retain=bool(summary["first_retain"]),
+                mixed_reuse=bool(summary["mixed_reuse"]),
+                first_reuse=bool(summary["first_reuse"]),
+                mixed_usd_output_mode=bool(summary["mixed_usd_output_mode"]),
+                first_usd_output_mode=str(summary["first_usd_output_mode"] or ""),
+                mixed_usd_output_custom_path=bool(summary["mixed_usd_output_custom_path"]),
+                first_usd_output_custom_path=str(summary["first_usd_output_custom_path"] or ""),
                 retained_usd_state=retained_usd_state,
                 can_delete=can_delete,
                 unchecked_state=unchecked_state,
@@ -5004,52 +5015,54 @@ class MainWindow(QtWidgets.QMainWindow):
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(folder)))
 
     def _refresh_ui_state(self) -> None:
-        running = self.queue_active and self._render_job_active()
+        render_job_active = self._render_job_active()
         scan_in_progress = self._scan_in_progress()
         create_job_scan_in_progress = bool(self._create_job_scan_in_progress)
         hbatch_ok = self._hbatch_exists()
         path_sync_in_progress = bool(self._path_sync_lock_counts)
+        has_queued = any(self._is_job_runnable(j) for j in self.jobs)
+        selected = self._selected_job()
+        can_start_selected = self._is_job_runnable(selected)
+        ui_state = build_ui_state_model(
+            queue_active=bool(self.queue_active),
+            queue_paused=bool(self.queue_paused),
+            render_job_active=bool(render_job_active),
+            scan_in_progress=bool(scan_in_progress),
+            create_job_scan_in_progress=bool(create_job_scan_in_progress),
+            hbatch_ok=bool(hbatch_ok),
+            path_sync_in_progress=bool(path_sync_in_progress),
+            experimental_chunking_enabled=bool(self._experimental_chunking_enabled()),
+            chunking_checked=bool(self.chk_enable_chunking.isChecked()),
+            has_queued=bool(has_queued),
+            can_start_selected=bool(can_start_selected),
+            selected_has_log=bool(selected and selected.log_file_path),
+        )
 
         self.add_job_panel.set_enabled_for_run_state(self.queue_active, create_job_scan_in_progress)
         self.btn_preferences.setEnabled(not scan_in_progress)
         if hasattr(self, "btn_reload_all_tree") and self.btn_reload_all_tree is not None:
-            self.btn_reload_all_tree.setEnabled(hbatch_ok and not scan_in_progress and not self._render_job_active() and not path_sync_in_progress)
-        experimental_chunking_enabled = self._experimental_chunking_enabled()
-        self.chk_enable_chunking.setVisible(experimental_chunking_enabled)
-        self.spin_chunk_size.setVisible(experimental_chunking_enabled)
-        if not experimental_chunking_enabled and self.chk_enable_chunking.isChecked():
+            self.btn_reload_all_tree.setEnabled(bool(ui_state["reload_all_enabled"]))
+        self.chk_enable_chunking.setVisible(bool(ui_state["chunking_visible"]))
+        self.spin_chunk_size.setVisible(bool(ui_state["chunking_visible"]))
+        if bool(ui_state["force_disable_chunking"]):
             self.chk_enable_chunking.setChecked(False)
 
-        has_queued = any(self._is_job_runnable(j) for j in self.jobs)
-        selected = self._selected_job()
-        can_start_selected = self._is_job_runnable(selected)
-        self.btn_start_queue.setEnabled(
-            hbatch_ok and (has_queued or can_start_selected or (self.queue_active and self.queue_paused))
-        )
-        self.btn_pause_queue.setEnabled(self.queue_active)
-        self.btn_pause_queue.setText("Resume" if self.queue_paused else "Pause")
-        self.btn_stop_queue.setEnabled(self.queue_active or self._render_job_active())
-        self.queue_file_menu_button.setEnabled(not scan_in_progress and not self._render_job_active() and not path_sync_in_progress)
-        self.chk_disable_husk_mplay.setEnabled(not self.queue_active and not self._render_job_active())
-        self.chk_enable_chunking.setEnabled(experimental_chunking_enabled and not self.queue_active and not self._render_job_active())
-        self.spin_chunk_size.setEnabled(
-            experimental_chunking_enabled and not self.queue_active and not self._render_job_active() and self.chk_enable_chunking.isChecked()
-        )
-        self.spin_auto_retry.setEnabled(not self.queue_active and not self._render_job_active())
-        self.spin_retry_delay.setEnabled(not self.queue_active and not self._render_job_active())
-
-        selected = self._selected_job()
-        self.btn_open_log_file.setEnabled(bool(selected and selected.log_file_path))
+        self.btn_start_queue.setEnabled(bool(ui_state["start_enabled"]))
+        self.btn_pause_queue.setEnabled(bool(ui_state["pause_enabled"]))
+        self.btn_pause_queue.setText(str(ui_state["pause_text"]))
+        self.btn_stop_queue.setEnabled(bool(ui_state["stop_enabled"]))
+        self.queue_file_menu_button.setEnabled(bool(ui_state["queue_file_menu_enabled"]))
+        self.chk_disable_husk_mplay.setEnabled(bool(ui_state["disable_husk_mplay_enabled"]))
+        self.chk_enable_chunking.setEnabled(bool(ui_state["chunk_checkbox_enabled"]))
+        self.spin_chunk_size.setEnabled(bool(ui_state["chunk_size_enabled"]))
+        self.spin_auto_retry.setEnabled(bool(ui_state["auto_retry_enabled"]))
+        self.spin_retry_delay.setEnabled(bool(ui_state["retry_delay_enabled"]))
+        self.btn_open_log_file.setEnabled(bool(ui_state["selected_has_log"]))
         self._update_job_properties_panel()
 
-        if running:
-            self._set_status_message("Rendering...")
-        elif self.queue_active and self.queue_paused:
-            self._set_status_message("Queue paused")
-        elif create_job_scan_in_progress:
-            self._set_status_message("Scanning /out ...")
-        elif path_sync_in_progress:
-            self._set_status_message("Updating path...")
+        status_message = str(ui_state["status_message"] or "")
+        if status_message:
+            self._set_status_message(status_message)
 
     def _reload_all_jobs_from_files(self) -> None:
         if self._scan_in_progress():
