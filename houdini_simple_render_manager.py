@@ -113,6 +113,12 @@ from queue_path_sync_lock import (
     end_path_sync_lock as end_path_sync_lock_model,
     is_job_path_sync_locked as is_job_path_sync_locked_model,
 )
+from queue_header_grouping import (
+    is_valid_queue_header_grouping as is_valid_queue_header_grouping_model,
+    queue_column_widths_from_data as queue_column_widths_from_data_model,
+    queue_header_visual_order as queue_header_visual_order_model,
+    queue_hidden_columns_from_data as queue_hidden_columns_from_data_model,
+)
 from queue_table_model import QueueTableModel, QueueTableModelHooks
 from queue_tree_ui import (
     TREE_HIP_ROLE,
@@ -4475,34 +4481,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _queue_header_visual_order(self) -> list[int]:
         header = self.queue_table.horizontalHeader()
-        return [header.logicalIndex(v) for v in range(self.queue_table.columnCount())]
+        return queue_header_visual_order_model(
+            column_count=self.queue_table.columnCount(),
+            logical_index_for_visual=header.logicalIndex,
+        )
 
     def _queue_hidden_columns_from_data(self, raw: Any) -> set[int]:
-        result: set[int] = set()
-        if not isinstance(raw, list):
-            return result
-        for v in raw:
-            try:
-                i = int(v)
-            except (TypeError, ValueError):
-                continue
-            if 0 <= i < self.queue_table.columnCount():
-                result.add(i)
-        return result
+        return queue_hidden_columns_from_data_model(raw, column_count=self.queue_table.columnCount())
 
     def _queue_column_widths_from_data(self, raw: Any) -> dict[int, int]:
-        result: dict[int, int] = {}
-        if not isinstance(raw, dict):
-            return result
-        for key, value in raw.items():
-            try:
-                logical = int(key)
-                width = int(value)
-            except (TypeError, ValueError):
-                continue
-            if 0 <= logical < self.queue_table.columnCount() and width > 8:
-                result[logical] = width
-        return result
+        return queue_column_widths_from_data_model(raw, column_count=self.queue_table.columnCount())
 
     def _reset_queue_view_to_defaults(self) -> None:
         default_widths = getattr(self, "_queue_default_column_widths", {})
@@ -4527,18 +4515,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _is_valid_queue_header_grouping(self) -> bool:
         header = self.queue_table.horizontalHeader()
-        left_group = {0, 1, 2, 3, 4, 5, 6}
-        for logical in range(self.queue_table.columnCount()):
-            if self.queue_table.isColumnHidden(logical):
-                continue
-            visual = header.visualIndex(logical)
-            if visual < 0:
-                continue
-            if logical in left_group and visual >= 6:
-                return False
-            if logical not in left_group and visual < 6:
-                return False
-        return True
+        return is_valid_queue_header_grouping_model(
+            column_count=self.queue_table.columnCount(),
+            left_group={0, 1, 2, 3, 4, 5, 6},
+            boundary_visual_index=6,
+            is_hidden=self.queue_table.isColumnHidden,
+            visual_index_for_logical=header.visualIndex,
+        )
 
     def _restore_queue_header_order(self, visual_order: list[int]) -> None:
         header = self.queue_table.horizontalHeader()
