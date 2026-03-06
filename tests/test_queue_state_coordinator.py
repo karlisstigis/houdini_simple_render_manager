@@ -17,6 +17,8 @@ class _FakeWindow:
         self.jobs = jobs
         self.scheduled: list[tuple[object, int]] = []
         self._last_recovery_headline = ""
+        self.selected_job_ids: list[str] = []
+        self.reload_requests: list[list[str]] = []
 
     def _startup_check_files_on_open(self) -> bool:
         return True
@@ -41,8 +43,11 @@ class _FakeWindow:
     def _schedule_deferred(self, callback, delay_ms: int) -> None:  # type: ignore[no-untyped-def]
         self.scheduled.append((callback, delay_ms))
 
-    def _reload_all_jobs_from_files(self) -> None:
-        pass
+    def _selected_job_ids(self) -> list[str]:
+        return list(self.selected_job_ids)
+
+    def _reload_all_jobs_from_files(self, *, preserved_selection_job_ids=None) -> None:  # type: ignore[no-untyped-def]
+        self.reload_requests.append(list(preserved_selection_job_ids or []))
 
     def _refresh_queue_table(self, select_row=None) -> None:  # type: ignore[no-untyped-def]
         _ = select_row
@@ -93,14 +98,15 @@ class QueueStateCoordinatorTests(unittest.TestCase):
     def test_schedule_startup_reload_all_uses_deferred_reload(self) -> None:
         job = RenderJob(hip_path="E:/missing/test.hip", rop_path="/out/rop1", frame_range_mode="use_rop")
         window = _FakeReloadWindow([job])
+        window.selected_job_ids = [job.id]
 
         scheduled = QueueStateCoordinator(window).schedule_startup_reload_all()
 
         self.assertTrue(scheduled)
         self.assertEqual(len(window.scheduled), 1)
-        self.assertEqual(window.scheduled[0][0].__func__, window._reload_all_jobs_from_files.__func__)
-        self.assertIs(window.scheduled[0][0].__self__, window)
         self.assertEqual(window.scheduled[0][1], 0)
+        window.scheduled[0][0]()
+        self.assertEqual(window.reload_requests, [[job.id]])
 
 
 if __name__ == "__main__":

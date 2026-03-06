@@ -90,6 +90,7 @@ def defer_reload_jobs_from_file(
     reset_override_to_rop: bool,
     status_text: str,
     notification_label: str,
+    preserved_selection_job_ids: list[str],
     job_states_for_ids: Callable[[list[str]], list[dict[str, Any]]],
     begin_path_sync_lock: Callable[[list[str]], None],
     enqueue_path_sync_task: Callable[[dict[str, Any]], None],
@@ -103,8 +104,8 @@ def defer_reload_jobs_from_file(
         {
             "ids": ids,
             "before_states": before_states,
-            "undo_select_job_ids": ids,
-            "redo_select_job_ids": ids,
+            "undo_select_job_ids": list(preserved_selection_job_ids),
+            "redo_select_job_ids": list(preserved_selection_job_ids),
             "status_text": status_text,
             "reset_override_to_rop": reset_override_to_rop,
             "notification_label": notification_label,

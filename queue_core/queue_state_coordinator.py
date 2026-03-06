@@ -113,7 +113,13 @@ class QueueStateCoordinator:
             return False
         if not self._w.jobs:
             return False
-        self._w._schedule_deferred(self._w._reload_all_jobs_from_files, 0)
+        preserved_selection_job_ids = list(self._w._selected_job_ids())
+        self._w._schedule_deferred(
+            lambda ids=preserved_selection_job_ids: self._w._reload_all_jobs_from_files(
+                preserved_selection_job_ids=ids
+            ),
+            0,
+        )
         return True
 
     def _apply_startup_file_check_to_job(self, job: RenderJob) -> bool:

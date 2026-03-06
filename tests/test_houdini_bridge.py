@@ -5,7 +5,7 @@ import unittest
 from uuid import uuid4
 from pathlib import Path
 
-from houdini_core.houdini_bridge import ensure_husk_hook_files
+from houdini_core.houdini_bridge import build_render_preflight_script, ensure_husk_hook_files
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +14,21 @@ TEST_TEMP_ROOT = PROJECT_ROOT / ".tmp_test"
 
 
 class HoudiniBridgeTests(unittest.TestCase):
+    def test_build_render_preflight_script_quotes_hook_paths_with_spaces(self) -> None:
+        script = build_render_preflight_script(
+            scripts_dir=SCRIPTS_DIR,
+            rop_path="/stage/CamTop",
+            disable_husk_mplay=False,
+            hook_paths={
+                "pre_render": "C:/Users/Clean Space/AppData/Roaming/HoudiniSimpleRenderManager/hooks/hsrm_husk_pre_render.py",
+                "pre_frame": "",
+                "post_frame": "",
+                "post_render": "",
+            },
+        )
+        self.assertIn('quoted_hook_path = \'"%s"\' % str(hook_path).replace(\'"\', \'\\\\"\')', script)
+        self.assertIn('script.set(quoted_hook_path)', script)
+
     def test_ensure_husk_hook_files_copies_shared_retained_usd_helper(self) -> None:
         TEST_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
         target_dir = TEST_TEMP_ROOT / f"houdini_bridge_{uuid4().hex}"

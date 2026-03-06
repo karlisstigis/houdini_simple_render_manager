@@ -64,8 +64,9 @@ else:
         except Exception:
             existing = ""
 
+        quoted_hook_path = '"%s"' % str(hook_path).replace('"', '\\"')
         try:
-            script.set(hook_path)
+            script.set(quoted_hook_path)
         except Exception as exc:
             print("[Preflight] Failed to set hook %s path: %s" % (key, exc))
             return
@@ -82,9 +83,9 @@ else:
                 print("[Preflight] Failed to enable hook %s: %s" % (key, exc))
                 return
 
-        if existing and existing != hook_path:
+        if existing and existing != quoted_hook_path:
             print("[Preflight] Overrode hook %s path for session only: %s" % (key, existing))
-        print("[Preflight] Injected hook %s -> %s on %s" % (key, hook_path, node.path()))
+        print("[Preflight] Injected hook %s -> %s on %s" % (key, quoted_hook_path, node.path()))
 
     _inject_hook(n, "huskprerender", __HSRM_HOOK_PRE_RENDER_REPR__)
     _inject_hook(n, "huskpreframe", __HSRM_HOOK_PRE_FRAME_REPR__)

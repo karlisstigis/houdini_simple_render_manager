@@ -60,7 +60,7 @@ class QueuePathChangeOrchestrationTests(unittest.TestCase):
         self.assertEqual(queued_tasks[0]["ids"], ["job-a", "job-b"])
         self.assertEqual(queued_tasks[0]["status_text"], "Updating path...")
 
-    def test_defer_reload_jobs_from_file_uses_current_job_ids(self) -> None:
+    def test_defer_reload_jobs_from_file_preserves_selection_ids(self) -> None:
         first = RenderJob("E:/shot/a.hip", "/stage/main", "use_rop")
         second = RenderJob("E:/shot/b.hip", "/stage/main", "use_rop")
         locked: list[list[str]] = []
@@ -71,6 +71,7 @@ class QueuePathChangeOrchestrationTests(unittest.TestCase):
             reset_override_to_rop=True,
             status_text="Reloading...",
             notification_label="Reload Values from File",
+            preserved_selection_job_ids=[second.id],
             job_states_for_ids=lambda ids: [{"id": job_id} for job_id in ids],
             begin_path_sync_lock=lambda ids: locked.append(list(ids)),
             enqueue_path_sync_task=lambda task: queued_tasks.append(dict(task)),
@@ -81,7 +82,8 @@ class QueuePathChangeOrchestrationTests(unittest.TestCase):
         task = queued_tasks[0]
         self.assertTrue(task["reset_override_to_rop"])
         self.assertEqual(task["notification_label"], "Reload Values from File")
-        self.assertEqual(task["undo_select_job_ids"], [first.id, second.id])
+        self.assertEqual(task["undo_select_job_ids"], [second.id])
+        self.assertEqual(task["redo_select_job_ids"], [second.id])
         self.assertEqual(task["before_states"], [{"id": first.id}, {"id": second.id}])
 
 

@@ -3508,12 +3508,14 @@ class MainWindow(QtWidgets.QMainWindow):
         reset_override_to_rop: bool,
         status_text: str,
         notification_label: str,
+        preserved_selection_job_ids: list[str] | None = None,
     ) -> None:
         defer_reload_jobs_from_file_model(
             target_jobs,
             reset_override_to_rop=reset_override_to_rop,
             status_text=status_text,
             notification_label=notification_label,
+            preserved_selection_job_ids=list(preserved_selection_job_ids or self._selected_job_ids()),
             job_states_for_ids=self._job_states_for_ids,
             begin_path_sync_lock=self._begin_path_sync_lock,
             enqueue_path_sync_task=self._enqueue_path_sync_task,
@@ -5143,14 +5145,30 @@ class MainWindow(QtWidgets.QMainWindow):
         if status_message:
             self._set_status_message(status_message)
 
-    def _reload_all_jobs_from_files(self) -> None:
+    def _reload_all_jobs_from_files(self, *, preserved_selection_job_ids: list[str] | None = None) -> None:
         if self._scan_in_progress():
             return
+
+        def _defer_reload_jobs(
+            target_jobs: list[RenderJob],
+            *,
+            reset_override_to_rop: bool,
+            status_text: str,
+            notification_label: str,
+        ) -> None:
+            self._defer_reload_jobs_from_file(
+                target_jobs,
+                reset_override_to_rop=reset_override_to_rop,
+                status_text=status_text,
+                notification_label=notification_label,
+                preserved_selection_job_ids=preserved_selection_job_ids,
+            )
+
         run_reload_all_jobs_from_file_model(
             self.jobs,
             running_status=JobStatus.RUNNING,
             write_queue_snapshot=self._write_queue_snapshot,
-            defer_reload_jobs_from_file=self._defer_reload_jobs_from_file,
+            defer_reload_jobs_from_file=_defer_reload_jobs,
             set_status_message=self._set_status_message,
         )
 

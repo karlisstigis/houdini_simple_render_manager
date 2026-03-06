@@ -740,6 +740,24 @@ def build_app_stylesheet(theme: dict[str, str], icons: dict[str, str]) -> str:
         QTreeView#queueTree::branch:has-children:open {{
             image: url({icons.get('tree_open', '')});
         }}
+        QTableView {{
+            background-color: {t['table_base']};
+            alternate-background-color: {t['table_alt']};
+            gridline-color: #2b2b2b;
+            border: none;
+            outline: 0;
+            selection-background-color: transparent;
+            selection-color: #ffffff;
+        }}
+        QTableView::item:selected,
+        QTableView::item:selected:active,
+        QTableView::item:selected:!active,
+        QTableView::item:selected:alternate,
+        QTableView::item:selected:alternate:active,
+        QTableView::item:selected:alternate:!active {{
+            background-color: transparent;
+            color: #ffffff;
+        }}
         QTableWidget {{
             background-color: {t['table_base']};
             alternate-background-color: {t['table_alt']};
