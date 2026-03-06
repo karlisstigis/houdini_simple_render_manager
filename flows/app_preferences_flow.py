@@ -25,6 +25,17 @@ def dialog_experimental_flags(*, chunking_enabled: bool) -> dict[str, Any]:
     return {"chunking": bool(chunking_enabled)}
 
 
+def dialog_startup_options(
+    *,
+    check_files_on_startup: bool,
+    reload_all_jobs_on_startup: bool,
+) -> dict[str, Any]:
+    return {
+        "check_files_on_startup": bool(check_files_on_startup),
+        "reload_all_jobs_on_startup": bool(reload_all_jobs_on_startup),
+    }
+
+
 def dialog_device_defaults(
     *,
     mode: DeviceOverrideMode,
@@ -69,12 +80,22 @@ def parse_device_defaults(raw: Any) -> tuple[DeviceOverrideMode, str, bool, UsdO
     return mode, selection, retain_built_usd, usd_output_directory_mode, usd_output_directory_custom_path
 
 
+def parse_startup_options(raw: Any) -> tuple[bool, bool] | None:
+    if not isinstance(raw, dict):
+        return None
+    return (
+        bool(raw.get("check_files_on_startup", True)),
+        bool(raw.get("reload_all_jobs_on_startup", True)),
+    )
+
+
 def parse_preferences_payload(payload: dict[str, Any]) -> dict[str, Any]:
     hbatch_path = str(payload.get("hbatch_path", "") or "").strip()
     player_path = str(payload.get("player_path", "") or "").strip()
     theme = payload.get("theme", {})
     runtime_defaults = parse_runtime_defaults(payload.get("runtime_defaults", {}))
     device_defaults = parse_device_defaults(payload.get("device_defaults", {}))
+    startup_options = parse_startup_options(payload.get("startup_options", {}))
     experimental_flags = payload.get("experimental_flags", {})
     return {
         "hbatch_path": hbatch_path,
@@ -82,6 +103,7 @@ def parse_preferences_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "theme": normalize_theme_colors(theme) if isinstance(theme, dict) else None,
         "runtime_defaults": runtime_defaults,
         "device_defaults": device_defaults,
+        "startup_options": startup_options,
         "experimental_chunking_enabled": bool(experimental_flags.get("chunking", False))
         if isinstance(experimental_flags, dict)
         else None,

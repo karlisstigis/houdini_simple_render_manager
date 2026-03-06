@@ -72,7 +72,7 @@ class DeviceOverrideMode(str, Enum):
             return "All GPUs"
         if self is DeviceOverrideMode.SPECIFIC_GPUS:
             return "Specific GPU(s)"
-        return "Default"
+        return "Default from ROP"
 
 
 class UsdOutputDirectoryMode(str, Enum):
@@ -432,8 +432,8 @@ class RenderJob:
         effective_selection = self.effective_device_selection(default_selection)
         if override_mode is DeviceOverrideMode.DEFAULT:
             if effective_mode is DeviceOverrideMode.SPECIFIC_GPUS and effective_selection:
-                return f"Default ({effective_selection})"
-            return f"Default ({effective_mode.label()})"
+                return f"Default from ROP ({effective_selection})"
+            return f"Default from ROP ({effective_mode.label()})"
         if effective_mode is DeviceOverrideMode.SPECIFIC_GPUS and effective_selection:
             labels = []
             for token in effective_selection.split(","):

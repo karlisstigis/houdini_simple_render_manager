@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from queue_core.queue_models import JobStatus, RenderJob
 from app_core.recovery_reporting import build_startup_recovery_summary
 from queue_core.queue_persistence import load_queue_payload, save_queue_payload
 from flows.queue_state_io import (
@@ -79,6 +80,7 @@ class QueueStateCoordinator:
             self._w._tree_rop_records_by_hip[hip_value] = self._w._sanitize_tree_rop_records(records)
 
     def _apply_load_refresh_and_recovery(self) -> None:
+        self.apply_startup_job_file_checks()
         recovery_summary = build_startup_recovery_summary(self._w.jobs)
         if self._w.jobs:
             self._w._refresh_queue_table(select_row=0)
@@ -86,6 +88,7 @@ class QueueStateCoordinator:
             self._w._refresh_queue_table()
         if recovery_summary is None:
             self._w._last_recovery_headline = ""
+            self.schedule_startup_reload_all()
             return
         self._w._last_recovery_headline = recovery_summary.headline
         self._w._append_notification_message(recovery_summary.headline, "warning")
@@ -94,3 +97,38 @@ class QueueStateCoordinator:
             self._w._append_notification_message(notice.message, notice.severity)
             self._w._append_log("Stderr", f"[Recovery] {notice.technical_message}\n")
         self._w._set_status_message(recovery_summary.headline, 6000)
+        self.schedule_startup_reload_all()
+
+    def apply_startup_job_file_checks(self) -> bool:
+        if not self._w._startup_check_files_on_open():
+            return False
+        changed = False
+        for job in self._w.jobs:
+            if self._apply_startup_file_check_to_job(job):
+                changed = True
+        return changed
+
+    def schedule_startup_reload_all(self) -> bool:
+        if not self._w._startup_reload_all_jobs_on_open():
+            return False
+        if not self._w.jobs:
+            return False
+        self._w._schedule_deferred(self._w._reload_all_jobs_from_files, 0)
+        return True
+
+    def _apply_startup_file_check_to_job(self, job: RenderJob) -> bool:
+        if job.runtime.status == JobStatus.RUNNING:
+            return False
+        hip_path = str(job.spec.hip_path or "").strip()
+        hip_exists = bool(hip_path) and Path(hip_path).exists()
+        if not hip_exists:
+            before_status = job.runtime.status
+            before_error = str(job.runtime.error_summary or "")
+            self._w._mark_job_offline(job, "HIP file not found.")
+            return before_status != job.runtime.status or before_error != str(job.runtime.error_summary or "")
+        if job.runtime.status == JobStatus.OFFLINE and str(job.runtime.error_summary or "").strip() == "HIP file not found.":
+            self._w._restore_job_online_status(job)
+            job.runtime.error_summary = ""
+            job.runtime.offline_detected_reason = ""
+            return True
+        return False

@@ -22,16 +22,16 @@ DEFAULT_THEME: dict[str, Any] = {
     "selection_row": "#a6b9cf",
     "selection_row_alt": "#cde4ff",
     "selection_overlay_opacity": 50,
-    "path_sync_overlay_opacity": 28,
+    "path_sync_overlay_opacity": 50,
     "selection_line_enabled": True,
     "selection_line_thickness": 1,
     "queue_running": "#3e5e5d",
-    "queue_done": "#293129",
+    "queue_done": "#223222",
     "queue_failed": "#5a3000",
     "lock_color": "#c55e0f",
     "progress_usd_build": "#1e8ecb",
     "progress_render": "#ff7700",
-    "panel_gap": 8,
+    "panel_gap": 6,
 }
 
 SCROLLBAR_THICKNESS = 14

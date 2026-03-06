@@ -18,6 +18,34 @@ Local desktop queue manager for Houdini renders (PySide6 UI + hbatch/husk workfl
 pip install -r requirements.txt
 ```
 
+## Build Executable
+
+Install the build dependency:
+
+```bat
+pip install -r requirements-build.txt
+```
+
+Then build the Windows executable bundle:
+
+```bat
+build_exe.bat
+```
+
+This produces an `onedir` build under `dist/HoudiniSimpleRenderManager/`:
+
+- `HoudiniSimpleRenderManager.exe`
+- `scan_worker.exe`
+- `render_worker.exe`
+- bundled `assets/`
+- bundled `houdini_scripts/`
+
+Why this layout:
+
+- the main app is built as `onedir` for simpler debugging and more predictable Qt packaging
+- worker subprocesses are built as separate executables so the frozen GUI app does not need to launch Python scripts directly
+- Houdini itself is still an external dependency; bundling this app does not bundle Houdini
+
 ## Run
 
 ```bat

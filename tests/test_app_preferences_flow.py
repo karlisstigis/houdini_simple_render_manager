@@ -6,6 +6,7 @@ from flows.app_preferences_flow import (
     dialog_device_defaults,
     dialog_experimental_flags,
     dialog_runtime_defaults,
+    dialog_startup_options,
     parse_preferences_payload,
 )
 from queue_core.queue_models import DeviceOverrideMode, UsdOutputDirectoryMode
@@ -20,6 +21,10 @@ class AppPreferencesFlowTests(unittest.TestCase):
             retry_delay=8,
         )
         experimental = dialog_experimental_flags(chunking_enabled=False)
+        startup = dialog_startup_options(
+            check_files_on_startup=True,
+            reload_all_jobs_on_startup=False,
+        )
         device = dialog_device_defaults(
             mode=DeviceOverrideMode.SPECIFIC_GPUS,
             selection="0,1",
@@ -29,6 +34,8 @@ class AppPreferencesFlowTests(unittest.TestCase):
         )
         self.assertEqual(runtime["chunk_size"], 12)
         self.assertFalse(experimental["chunking"])
+        self.assertTrue(startup["check_files_on_startup"])
+        self.assertFalse(startup["reload_all_jobs_on_startup"])
         self.assertEqual(device["mode"], DeviceOverrideMode.SPECIFIC_GPUS.value)
         self.assertEqual(device["usd_output_directory_mode"], UsdOutputDirectoryMode.CUSTOM_PATH.value)
 
@@ -44,6 +51,10 @@ class AppPreferencesFlowTests(unittest.TestCase):
                     "retry_count": "-1",
                     "retry_delay": "5",
                 },
+                "startup_options": {
+                    "check_files_on_startup": 0,
+                    "reload_all_jobs_on_startup": 1,
+                },
                 "experimental_flags": {"chunking": True},
                 "device_defaults": {
                     "mode": "specific_gpus",
@@ -57,6 +68,7 @@ class AppPreferencesFlowTests(unittest.TestCase):
         self.assertEqual(parsed["hbatch_path"], "C:/H/bin/hbatch.exe")
         self.assertEqual(parsed["player_path"], "C:/Player/player.exe")
         self.assertTrue(parsed["experimental_chunking_enabled"])
+        self.assertEqual(parsed["startup_options"], (False, True))
         self.assertEqual(parsed["runtime_defaults"], (True, 1, 0, 5))
         self.assertIsNotNone(parsed["theme"])
         self.assertEqual(parsed["theme"]["panel_gap"], 2)
@@ -75,12 +87,14 @@ class AppPreferencesFlowTests(unittest.TestCase):
                 "theme": [],
                 "runtime_defaults": "bad",
                 "device_defaults": "bad",
+                "startup_options": "bad",
                 "experimental_flags": "bad",
             }
         )
         self.assertIsNone(parsed["theme"])
         self.assertIsNone(parsed["runtime_defaults"])
         self.assertIsNone(parsed["device_defaults"])
+        self.assertIsNone(parsed["startup_options"])
         self.assertIsNone(parsed["experimental_chunking_enabled"])
 
 

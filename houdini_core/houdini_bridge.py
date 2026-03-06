@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Callable
+
+from app_core.runtime_paths import bundled_path
 
 
 REQUIRED_HOUDINI_SCRIPT_FILENAMES = [
@@ -20,11 +21,7 @@ REQUIRED_HOUDINI_SCRIPT_FILENAMES = [
 
 
 def project_houdini_scripts_dir(main_file: str, scripts_dir_name: str) -> Path:
-    if getattr(sys, "frozen", False):
-        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
-    else:
-        base = Path(main_file).resolve().parent
-    return base / scripts_dir_name
+    return bundled_path(main_file, scripts_dir_name)
 
 
 def validate_houdini_script_files(scripts_dir: Path) -> list[str]:

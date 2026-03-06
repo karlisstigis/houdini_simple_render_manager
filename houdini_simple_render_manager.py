@@ -27,10 +27,12 @@ from app_core.action_policy import (
 from flows.app_preferences_flow import (
     dialog_device_defaults as dialog_device_defaults_model,
     dialog_experimental_flags as dialog_experimental_flags_model,
+    dialog_startup_options as dialog_startup_options_model,
     dialog_runtime_defaults as dialog_runtime_defaults_model,
     parse_preferences_payload as parse_preferences_payload_model,
 )
 from app_core.atomic_io import read_json_file, write_json_atomic
+from app_core.runtime_paths import bundled_path as bundled_path_model, executable_path as executable_path_model
 from app_core.diagnostics import DiagnosticsSnapshot, build_diagnostics_report
 from app_core.diagnostics_snapshot_builder import build_diagnostics_snapshot as build_diagnostics_snapshot_model
 from houdini_core.houdini_service import (
@@ -316,11 +318,10 @@ HOUDINI_SCRIPTS_DIR_NAME = "houdini_scripts"
 LOGGER = logging.getLogger(__name__)
 UI_DEFERRED_NOW_MS = 0
 UI_DEFERRED_SETTLE_MS = 120
-TABLER_NOTIFICATION_ICONS_DIR = Path(__file__).resolve().parent / "assets" / "third_party" / "tabler"
-TABLER_NOTIFICATION_ICON_PATHS = {
-    "info": TABLER_NOTIFICATION_ICONS_DIR / "info-circle.svg",
-    "warning": TABLER_NOTIFICATION_ICONS_DIR / "alert-triangle.svg",
-    "error": TABLER_NOTIFICATION_ICONS_DIR / "alert-octagon.svg",
+TABLER_NOTIFICATION_ICON_FILES = {
+    "info": "info-circle.svg",
+    "warning": "alert-triangle.svg",
+    "error": "alert-octagon.svg",
 }
 
 DEFAULT_QUEUE_COLUMN_WIDTHS: dict[int, int] = {
@@ -374,6 +375,8 @@ class ConfigStore:
             "default_chunk_size": 10,
             "default_retry_count": 1,
             "default_retry_delay": 5,
+            "startup_check_files_on_open": True,
+            "startup_reload_all_jobs_on_open": True,
             "default_device_mode": DeviceOverrideMode.DEFAULT.value,
             "default_device_selection": "",
             "default_retain_built_usd": False,
@@ -1089,9 +1092,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._schedule_next_path_sync_task()
 
     def _worker_script_path(self, filename: str) -> Path:
-        return Path(__file__).resolve().with_name(filename)
+        worker_name = Path(filename).name
+        if getattr(sys, "frozen", False):
+            return executable_path_model(__file__, Path(worker_name).with_suffix(".exe").name)
+        return bundled_path_model(__file__, worker_name)
 
     def _worker_python_path(self) -> str:
+        if getattr(sys, "frozen", False):
+            return ""
         return sys.executable or "python"
 
     def _send_scan_worker_request(self, message_type: str, payload: dict[str, Any]) -> bool:
@@ -2222,6 +2230,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_hbatch_path(),
             self._current_player_path(),
             dict(self.theme),
+            dialog_startup_options_model(
+                check_files_on_startup=self._startup_check_files_on_open(),
+                reload_all_jobs_on_startup=self._startup_reload_all_jobs_on_open(),
+            ),
             dialog_runtime_defaults_model(
                 chunking_enabled=self._default_chunking_enabled(),
                 chunk_size=self._default_chunk_size(),
@@ -2238,6 +2250,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 usd_output_directory_mode=self._default_usd_output_directory_mode(),
                 usd_output_directory_custom_path=self._default_usd_output_directory_custom_path(),
             ),
+            self._available_render_devices(),
             str(self.config.logs_dir),
             discover_hbatch,
             safe_message,
@@ -2256,6 +2269,7 @@ class MainWindow(QtWidgets.QMainWindow):
         theme = parsed.get("theme")
         runtime_defaults = parsed.get("runtime_defaults")
         device_defaults = parsed.get("device_defaults")
+        startup_options = parsed.get("startup_options")
         experimental_chunking_enabled = parsed.get("experimental_chunking_enabled")
         self._hbatch_path = hbatch_path
         self._save_hbatch_path()
@@ -2266,6 +2280,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_theme()
         if experimental_chunking_enabled is not None:
             self.config.set("experimental_chunking_enabled", bool(experimental_chunking_enabled))
+        if startup_options is not None:
+            check_files_on_startup, reload_all_jobs_on_startup = startup_options
+            self.config.set("startup_check_files_on_open", bool(check_files_on_startup))
+            self.config.set("startup_reload_all_jobs_on_open", bool(reload_all_jobs_on_startup))
         if runtime_defaults is not None:
             chunking_enabled, chunk_size, retry_count, retry_delay = runtime_defaults
             self.config.set("default_chunking_enabled", chunking_enabled)
@@ -2297,6 +2315,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _current_player_path(self) -> str:
         return str(self.config.get("player_path", "") or "").strip()
+
+    def _startup_check_files_on_open(self) -> bool:
+        return bool(self.config.get("startup_check_files_on_open", True))
+
+    def _startup_reload_all_jobs_on_open(self) -> bool:
+        return bool(self.config.get("startup_reload_all_jobs_on_open", True))
 
     def _current_queue_file_path(self) -> Path:
         return self.queue_file_controller.current_queue_file_path()
@@ -4429,7 +4453,12 @@ class MainWindow(QtWidgets.QMainWindow):
         cached_icon = self._notification_icon_cache.get(sev)
         if cached_icon is not None and not cached_icon.isNull():
             return cached_icon
-        icon_path = TABLER_NOTIFICATION_ICON_PATHS.get(sev)
+        icon_filename = TABLER_NOTIFICATION_ICON_FILES.get(sev)
+        icon_path = (
+            bundled_path_model(__file__, "assets", "third_party", "tabler", icon_filename)
+            if icon_filename
+            else None
+        )
         if icon_path is not None and icon_path.exists():
             icon = self._load_tinted_svg_icon(icon_path, self._notification_color_for_severity(sev))
             if not icon.isNull():

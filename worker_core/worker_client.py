@@ -74,12 +74,18 @@ class _BaseWorkerClient(QtCore.QObject):
         proc.readyReadStandardError.connect(self._on_stderr)
         proc.errorOccurred.connect(self._on_process_error)
         proc.finished.connect(self._on_finished)
-        proc.start(self._worker_python_path, [str(self._worker_script_path)])
+        program, args = self._launch_command()
+        proc.start(program, args)
         if not proc.waitForStarted(5000):
             self._process = None
             return False
         self._health_timer.start()
         return True
+
+    def _launch_command(self) -> tuple[str, list[str]]:
+        if self._worker_script_path.suffix.lower() == ".exe":
+            return str(self._worker_script_path), []
+        return str(self._worker_python_path or "python"), [str(self._worker_script_path)]
 
     def send_request(self, message_type: str, payload: dict, *, request_id: str | None = None) -> str | None:
         if not self.ensure_started() or self._process is None:

@@ -6,19 +6,25 @@ from typing import Any, Callable
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from queue_core.queue_models import DeviceOverrideMode, UsdOutputDirectoryMode
+from queue_core.queue_models import DeviceOverrideMode, RenderJob, UsdOutputDirectoryMode
 from queue_core.queue_table_model import PATH_SYNC_LOCKED_ROLE, QueueTableModel
 from ui_core.theme_support import DEFAULT_THEME, styled_scrollbar_extent
 
 TABLER_NOTIFICATION_NOTICE_HTML = (
     "<b>Notification Icons</b><br>"
     "This app bundles notification icons from "
-    '<a href="https://new.tabler.io/icons">Tabler Icons</a> by Pawel Kuna. '
+    '<a href="https://new.tabler.io/icons"><span style="color:#ffffff; text-decoration:underline;">Tabler Icons</span></a> by Pawel Kuna. '
     "They are provided under the MIT License.<br><br>"
-    'Source pages: <a href="https://tabler.io/icons/icon/alert-triangle">alert-triangle</a>, '
-    '<a href="https://tabler.io/icons/icon/alert-octagon">alert-octagon</a>, '
-    '<a href="https://tabler.io/icons/icon/info-circle">info-circle</a>.<br>'
+    'Source pages: <a href="https://tabler.io/icons/icon/alert-triangle"><span style="color:#ffffff; text-decoration:underline;">alert-triangle</span></a>, '
+    '<a href="https://tabler.io/icons/icon/alert-octagon"><span style="color:#ffffff; text-decoration:underline;">alert-octagon</span></a>, '
+    '<a href="https://tabler.io/icons/icon/info-circle"><span style="color:#ffffff; text-decoration:underline;">info-circle</span></a>.<br>'
     "Bundled license file: <code>assets/third_party/tabler/LICENSE.txt</code>"
+)
+
+CREATOR_NOTICE_HTML = (
+    "<b>Houdini Simple Render Manager</b><br>"
+    "Karlis Stigis<br>"
+    '<a href="https://karlisstigis.com"><span style="color:#ffffff; text-decoration:underline;">https://karlisstigis.com</span></a>'
 )
 
 
@@ -374,9 +380,11 @@ class PreferencesDialog(QtWidgets.QDialog):
         hbatch_path: str,
         player_path: str,
         theme: dict[str, str],
+        startup_options: dict[str, Any],
         runtime_defaults: dict[str, Any],
         experimental_flags: dict[str, Any],
         device_defaults: dict[str, Any],
+        available_render_devices: list[dict[str, str]],
         logs_dir: str,
         discover_hbatch_fn: Callable[[], str],
         safe_message_fn: Callable[[QtWidgets.QWidget, str, str, str | None], None],
@@ -389,16 +397,28 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._safe_message_fn = safe_message_fn
         self._theme_buttons: dict[str, ColorPickerButton] = {}
         self._logs_dir = Path(logs_dir)
-        self._build_ui(hbatch_path, player_path, theme, runtime_defaults, experimental_flags, device_defaults, logs_dir)
+        self._build_ui(
+            hbatch_path,
+            player_path,
+            theme,
+            startup_options,
+            runtime_defaults,
+            experimental_flags,
+            device_defaults,
+            available_render_devices,
+            logs_dir,
+        )
 
     def _build_ui(
         self,
         hbatch_path: str,
         player_path: str,
         theme: dict[str, str],
+        startup_options: dict[str, Any],
         runtime_defaults: dict[str, Any],
         experimental_flags: dict[str, Any],
         device_defaults: dict[str, Any],
+        available_render_devices: list[dict[str, str]],
         logs_dir: str,
     ) -> None:
         root = QtWidgets.QVBoxLayout(self)
@@ -431,6 +451,10 @@ class PreferencesDialog(QtWidgets.QDialog):
             "Retry Count",
             "Retry Delay (s)",
         ]
+        startup_labels = [
+            "Check Files On Startup",
+            "Reload All Jobs On Startup",
+        ]
         color_groups: list[list[tuple[str, str]]] = [
             [
                 ("background", "Background"),
@@ -458,7 +482,7 @@ class PreferencesDialog(QtWidgets.QDialog):
                 ("progress_render", "Render Line"),
             ],
         ]
-        all_labels = [label for group in color_groups for _, label in group] + metric_labels + runtime_labels
+        all_labels = [label for group in color_groups for _, label in group] + metric_labels + runtime_labels + startup_labels
         label_width = max((self.fontMetrics().horizontalAdvance(label) for label in all_labels), default=0) + 12
         control_min_width = 120
         divider_width = 1
@@ -617,10 +641,24 @@ class PreferencesDialog(QtWidgets.QDialog):
         experimental_layout.addWidget(self.chk_experimental_chunking, 0, 2, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
         experimental_panel = PanelFrame("Experimental", experimental_host)
 
+        startup_host = QtWidgets.QWidget()
+        startup_host.setObjectName("transparentHost")
+        startup_layout = QtWidgets.QGridLayout(startup_host)
+        _configure_pref_grid(startup_layout, 2)
+        self.chk_startup_check_files = QtWidgets.QCheckBox("Enabled")
+        self.chk_startup_check_files.setChecked(bool(startup_options.get("check_files_on_startup", True)))
+        self.chk_startup_reload_all = QtWidgets.QCheckBox("Enabled")
+        self.chk_startup_reload_all.setChecked(bool(startup_options.get("reload_all_jobs_on_startup", True)))
+        startup_layout.addWidget(_runtime_label("Check Files On Startup"), 0, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        startup_layout.addWidget(self.chk_startup_check_files, 0, 2, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        startup_layout.addWidget(_runtime_label("Reload All Jobs On Startup"), 1, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        startup_layout.addWidget(self.chk_startup_reload_all, 1, 2, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        startup_panel = PanelFrame("Startup", startup_host)
+
         device_host = QtWidgets.QWidget()
         device_host.setObjectName("transparentHost")
         device_layout = QtWidgets.QGridLayout(device_host)
-        _configure_pref_grid(device_layout, 5)
+        _configure_pref_grid(device_layout, 3)
         self.default_device_mode = QtWidgets.QComboBox()
         for mode in (
             DeviceOverrideMode.DEFAULT,
@@ -631,11 +669,29 @@ class PreferencesDialog(QtWidgets.QDialog):
             self.default_device_mode.addItem(mode.label(), mode.value)
         current_default_mode = DeviceOverrideMode.coerce(device_defaults.get("mode"))
         self.default_device_mode.setCurrentIndex(max(0, self.default_device_mode.findData(current_default_mode.value)))
-        self.default_device_selection = QtWidgets.QLineEdit(str(device_defaults.get("selection", "") or ""))
-        self.default_device_selection.setPlaceholderText("GPU ids, e.g. 0,1")
-        self.default_device_selection.setMinimumWidth(control_min_width)
+        self._default_device_option_checks: list[tuple[str, QtWidgets.QCheckBox]] = []
+        self.default_device_selection_label = _runtime_label("Custom Devices")
+        self.default_device_selection_container = QtWidgets.QWidget()
+        self.default_device_selection_container.setObjectName("transparentHost")
+        self.default_device_selection_layout = QtWidgets.QVBoxLayout(self.default_device_selection_container)
+        self.default_device_selection_layout.setContentsMargins(0, 0, 0, 0)
+        self.default_device_selection_layout.setSpacing(6)
+        self._set_default_device_options(
+            available_render_devices,
+            selection=str(device_defaults.get("selection", "") or ""),
+        )
         self.chk_default_retain_built_usd = QtWidgets.QCheckBox("Enabled")
         self.chk_default_retain_built_usd.setChecked(bool(device_defaults.get("retain_built_usd", False)))
+        device_layout.addWidget(_runtime_label("Default Device"), 0, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        device_layout.addWidget(self.default_device_mode, 0, 2)
+        device_layout.addWidget(self.default_device_selection_label, 1, 0, alignment=QtCore.Qt.AlignmentFlag.AlignTop)
+        device_layout.addWidget(self.default_device_selection_container, 1, 2)
+        device_panel = PanelFrame("Render Device Defaults", device_host)
+
+        usd_defaults_host = QtWidgets.QWidget()
+        usd_defaults_host.setObjectName("transparentHost")
+        usd_defaults_layout = QtWidgets.QGridLayout(usd_defaults_host)
+        _configure_pref_grid(usd_defaults_layout, 3)
         self.default_usd_output_mode = QtWidgets.QComboBox()
         for mode in (
             UsdOutputDirectoryMode.DEFAULT_TEMP,
@@ -652,24 +708,19 @@ class PreferencesDialog(QtWidgets.QDialog):
         self.btn_browse_default_usd_output_custom_path.clicked.connect(self._browse_default_usd_output_custom_path)
         self.default_device_mode.currentIndexChanged.connect(self._refresh_device_defaults_ui)
         self.default_usd_output_mode.currentIndexChanged.connect(self._refresh_device_defaults_ui)
-
-        device_layout.addWidget(_runtime_label("Default Device"), 0, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
-        device_layout.addWidget(self.default_device_mode, 0, 2)
-        device_layout.addWidget(_runtime_label("GPU Selection"), 1, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
-        device_layout.addWidget(self.default_device_selection, 1, 2)
-        device_layout.addWidget(_runtime_label("Retain Built USD"), 2, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
-        device_layout.addWidget(self.chk_default_retain_built_usd, 2, 2, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
-        device_layout.addWidget(_runtime_label("USD Output Directory"), 3, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
-        device_layout.addWidget(self.default_usd_output_mode, 3, 2)
-        device_layout.addWidget(_runtime_label("USD Custom Path"), 4, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        usd_defaults_layout.addWidget(_runtime_label("Retain Built USD"), 0, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        usd_defaults_layout.addWidget(self.chk_default_retain_built_usd, 0, 2, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        usd_defaults_layout.addWidget(_runtime_label("USD Output Directory"), 1, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        usd_defaults_layout.addWidget(self.default_usd_output_mode, 1, 2)
+        usd_defaults_layout.addWidget(_runtime_label("USD Custom Path"), 2, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
         default_usd_output_row = QtWidgets.QHBoxLayout()
         default_usd_output_row.setContentsMargins(0, 0, 0, 0)
         default_usd_output_row.setSpacing(8)
         default_usd_output_row.addWidget(self.default_usd_output_custom_path, 1)
         default_usd_output_row.addWidget(self.btn_browse_default_usd_output_custom_path)
-        device_layout.addLayout(default_usd_output_row, 4, 2)
+        usd_defaults_layout.addLayout(default_usd_output_row, 2, 2)
         self._refresh_device_defaults_ui()
-        device_panel = PanelFrame("Render Device + USD Defaults", device_host)
+        usd_defaults_panel = PanelFrame("USD Defaults", usd_defaults_host)
 
         logs_host = QtWidgets.QWidget()
         logs_host.setObjectName("transparentHost")
@@ -802,26 +853,46 @@ class PreferencesDialog(QtWidgets.QDialog):
         colors_root.addWidget(buttons_host)
         theme_panel = PanelFrame("Theme", theme_host)
 
+        def _configure_preferences_rich_text_label(label: QtWidgets.QLabel) -> None:
+            label.setWordWrap(True)
+            label.setOpenExternalLinks(True)
+            label.setTextFormat(QtCore.Qt.TextFormat.RichText)
+            label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextBrowserInteraction)
+            palette = label.palette()
+            palette.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("#d8d8d8"))
+            label.setPalette(palette)
+            label.setStyleSheet("QLabel { color: #d8d8d8; }")
+
+        creator_host = QtWidgets.QWidget()
+        creator_host.setObjectName("transparentHost")
+        creator_layout = QtWidgets.QVBoxLayout(creator_host)
+        creator_layout.setContentsMargins(10, 10, 10, 10)
+        creator_layout.setSpacing(8)
+        creator_notice = QtWidgets.QLabel(CREATOR_NOTICE_HTML)
+        _configure_preferences_rich_text_label(creator_notice)
+        creator_layout.addWidget(creator_notice)
+        creator_panel = PanelFrame("Creator", creator_host)
+
         third_party_host = QtWidgets.QWidget()
         third_party_host.setObjectName("transparentHost")
         third_party_layout = QtWidgets.QVBoxLayout(third_party_host)
         third_party_layout.setContentsMargins(10, 10, 10, 10)
         third_party_layout.setSpacing(8)
         third_party_notice = QtWidgets.QLabel(TABLER_NOTIFICATION_NOTICE_HTML)
-        third_party_notice.setWordWrap(True)
-        third_party_notice.setOpenExternalLinks(True)
-        third_party_notice.setTextFormat(QtCore.Qt.TextFormat.RichText)
-        third_party_notice.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextBrowserInteraction)
+        _configure_preferences_rich_text_label(third_party_notice)
         third_party_layout.addWidget(third_party_notice)
         third_party_panel = PanelFrame("Third-Party Assets", third_party_host)
 
         scroll_layout.addWidget(settings_panel)
         scroll_layout.addWidget(player_settings_panel)
         scroll_layout.addWidget(experimental_panel)
+        scroll_layout.addWidget(startup_panel)
         scroll_layout.addWidget(runtime_panel)
         scroll_layout.addWidget(device_panel)
+        scroll_layout.addWidget(usd_defaults_panel)
         scroll_layout.addWidget(logs_panel)
         scroll_layout.addWidget(theme_panel)
+        scroll_layout.addWidget(creator_panel)
         scroll_layout.addWidget(third_party_panel)
         scroll_layout.addStretch(1)
 
@@ -929,11 +1000,37 @@ class PreferencesDialog(QtWidgets.QDialog):
 
     def _refresh_device_defaults_ui(self) -> None:
         mode = DeviceOverrideMode.coerce(self.default_device_mode.currentData())
-        self.default_device_selection.setEnabled(mode is DeviceOverrideMode.SPECIFIC_GPUS)
+        show_custom_devices = mode is DeviceOverrideMode.SPECIFIC_GPUS
+        self.default_device_selection_label.setVisible(show_custom_devices)
+        self.default_device_selection_container.setVisible(show_custom_devices)
+        for _device_id, checkbox in self._default_device_option_checks:
+            checkbox.setEnabled(show_custom_devices)
         usd_mode = UsdOutputDirectoryMode.coerce(self.default_usd_output_mode.currentData())
         enable_custom_usd_path = usd_mode is UsdOutputDirectoryMode.CUSTOM_PATH
         self.default_usd_output_custom_path.setEnabled(enable_custom_usd_path)
         self.btn_browse_default_usd_output_custom_path.setEnabled(enable_custom_usd_path)
+
+    def _set_default_device_options(self, devices: list[dict[str, str]], *, selection: str) -> None:
+        normalized = RenderJob.normalize_device_selection(selection)
+        selected_ids = set(part for part in normalized.split(",") if part.isdigit())
+        while self.default_device_selection_layout.count():
+            item = self.default_device_selection_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._default_device_option_checks = []
+        if not devices:
+            empty = QtWidgets.QLabel("No render devices detected")
+            empty.setWordWrap(True)
+            self.default_device_selection_layout.addWidget(empty)
+            return
+        for device in devices:
+            device_id = str(device.get("id", "") or "")
+            checkbox = QtWidgets.QCheckBox(str(device.get("name", "") or device_id))
+            checkbox.setChecked(device_id in selected_ids)
+            self._default_device_option_checks.append((device_id, checkbox))
+            self.default_device_selection_layout.addWidget(checkbox)
+        self.default_device_selection_layout.addStretch(1)
 
     def _refresh_experimental_ui(self) -> None:
         chunking_enabled = bool(self.chk_experimental_chunking.isChecked())
@@ -963,9 +1060,17 @@ class PreferencesDialog(QtWidgets.QDialog):
             "experimental_flags": {
                 "chunking": bool(self.chk_experimental_chunking.isChecked()),
             },
+            "startup_options": {
+                "check_files_on_startup": bool(self.chk_startup_check_files.isChecked()),
+                "reload_all_jobs_on_startup": bool(self.chk_startup_reload_all.isChecked()),
+            },
             "device_defaults": {
                 "mode": str(self.default_device_mode.currentData() or DeviceOverrideMode.DEFAULT.value),
-                "selection": self.default_device_selection.text().strip(),
+                "selection": ",".join(
+                    device_id
+                    for device_id, checkbox in self._default_device_option_checks
+                    if checkbox.isChecked()
+                ),
                 "retain_built_usd": bool(self.chk_default_retain_built_usd.isChecked()),
                 "usd_output_directory_mode": str(self.default_usd_output_mode.currentData() or UsdOutputDirectoryMode.DEFAULT_TEMP.value),
                 "usd_output_directory_custom_path": self.default_usd_output_custom_path.text().strip(),

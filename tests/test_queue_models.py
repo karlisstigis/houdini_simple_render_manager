@@ -58,7 +58,7 @@ class QueueModelTests(unittest.TestCase):
 
     def test_device_summary_uses_defaults_and_overrides(self) -> None:
         job = RenderJob("E:/shot/test.hip", "/out/mantra1", "use_rop")
-        self.assertEqual(job.device_summary(DeviceOverrideMode.ALL_GPUS), "Default (All GPUs)")
+        self.assertEqual(job.device_summary(DeviceOverrideMode.ALL_GPUS), "Default from ROP (All GPUs)")
         job.spec.device_override_mode = DeviceOverrideMode.SPECIFIC_GPUS
         job.spec.device_selection = "0,1"
         self.assertEqual(job.device_summary(DeviceOverrideMode.ALL_GPUS), "0,1")
