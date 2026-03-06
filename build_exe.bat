@@ -11,6 +11,7 @@ if not exist "%PYTHON_EXE%" (
 
 set "PYI_CMD=%PYTHON_EXE% -m PyInstaller"
 set "PYI_COMMON=--noconfirm --clean --distpath dist --workpath build\\pyinstaller --specpath build\\spec"
+set "APP_ICON=%ROOT_DIR%assets\\app_icon.ico"
 
 echo [1/5] Cleaning previous build outputs...
 if exist "%ROOT_DIR%build" rmdir /s /q "%ROOT_DIR%build"
@@ -22,6 +23,7 @@ echo [2/5] Building main application...
     --onedir ^
     --windowed ^
     --name HoudiniSimpleRenderManager ^
+    --icon "%APP_ICON%" ^
     --hidden-import PySide6.QtSvg ^
     --add-data "%ROOT_DIR%houdini_scripts;houdini_scripts" ^
     --add-data "%ROOT_DIR%assets;assets" ^
