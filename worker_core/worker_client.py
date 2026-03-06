@@ -245,14 +245,8 @@ class ScanWorkerClient(_BaseWorkerClient):
         timer.start(timeout_ms)
         loop.exec()
         timer.stop()
-        try:
-            self.message_received.disconnect(_on_message)
-        except Exception:
-            pass
-        try:
-            self.worker_failed.disconnect(_on_failure)
-        except Exception:
-            pass
+        _safe_disconnect(self.message_received, _on_message)
+        _safe_disconnect(self.worker_failed, _on_failure)
         return result_holder.get("message")
 
 
@@ -267,3 +261,10 @@ class RenderWorkerClient(_BaseWorkerClient):
             heartbeat_timeout_sec=12.0,
             parent=parent,
         )
+
+
+def _safe_disconnect(signal: QtCore.SignalInstance, handler) -> None:
+    try:
+        signal.disconnect(handler)
+    except Exception:
+        pass

@@ -13,18 +13,27 @@ def maybe_refresh_probe_path(
     hbatch_exists: bool,
     hip_path: str,
     rop_path: str,
-    needs_pattern_refresh_fn: Callable[[str, str, int, Callable[[str, int], Path | None]], bool],
+    needs_pattern_refresh_fn: Callable[..., bool],
     frame_path_for_frame_fn: Callable[[str, int], Path | None],
     probe_rop_info_fn: Callable[[str, str], Any | None],
     apply_rop_info_fn: Callable[[Any], None],
     refreshed_sample_path_fn: Callable[[], str],
 ) -> tuple[str, bool]:
-    needs_refresh = needs_pattern_refresh_fn(
-        probe_path,
-        sample_file_path,
-        start_frame,
-        frame_path_for_frame_fn,
-    )
+    try:
+        needs_refresh = needs_pattern_refresh_fn(
+            probe_path=probe_path,
+            sample_file_path=sample_file_path,
+            start_frame=start_frame,
+            frame_path_for_frame=frame_path_for_frame_fn,
+        )
+    except TypeError:
+        # Backward-compatible fallback for positional-only callbacks used in tests/older call sites.
+        needs_refresh = needs_pattern_refresh_fn(
+            probe_path,
+            sample_file_path,
+            start_frame,
+            frame_path_for_frame_fn,
+        )
     if not (needs_refresh and hip_exists and hbatch_exists):
         return probe_path, False
     info = probe_rop_info_fn(hip_path, rop_path)

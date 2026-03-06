@@ -40,6 +40,23 @@ def queue_column_widths_from_data(raw: Any, *, column_count: int, min_width: int
     return result
 
 
+def sanitized_queue_column_width(
+    *,
+    logical: int,
+    width: int,
+    default_width: int,
+    viewport_width: int,
+) -> int:
+    fallback_width = max(40, int(default_width), int(width))
+    per_column_budget = max(fallback_width * 3, 240)
+    if viewport_width > 0:
+        per_column_budget = max(per_column_budget, int(viewport_width * 0.45))
+        per_column_budget = min(per_column_budget, max(fallback_width * 6, int(viewport_width * 0.8)))
+    hard_cap = max(fallback_width * 8, 720)
+    max_width = min(max(per_column_budget, fallback_width), hard_cap)
+    return max(9, min(int(width), int(max_width)))
+
+
 def is_valid_queue_header_grouping(
     *,
     column_count: int,

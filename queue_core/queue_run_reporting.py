@@ -57,27 +57,23 @@ def build_queue_run_summary(jobs: list[RenderJob], started_job_ids: set[str]) ->
     for job in started_jobs:
         status = job.runtime.status
         counts[status] = counts.get(status, 0) + 1
-        for sec in list(job.view.render_frame_durations_sec or []):
+        for sec in job.view.render_frame_durations_sec:
             try:
                 v = float(sec)
             except (TypeError, ValueError):
                 continue
             if v >= 0:
                 frame_times.append(v)
-    avg_frame = ""
+    avg_frame_suffix = ""
     if frame_times:
-        avg_frame = f" | Avg frame {sum(frame_times)/len(frame_times):.2f}s"
+        avg_frame_suffix = f" | Avg frame {sum(frame_times) / len(frame_times):.2f}s"
     message = (
         f"Run summary: {len(started_jobs)} job(s) | "
         f"Done {counts.get(JobStatus.DONE, 0)} | "
         f"Failed {counts.get(JobStatus.FAILED, 0)} | "
         f"Canceled {counts.get(JobStatus.CANCELED, 0)} | "
         f"Interrupted {counts.get(JobStatus.INTERRUPTED, 0)}"
-        f"{avg_frame}"
+        f"{avg_frame_suffix}"
     )
-    severity = "warning" if (
-        counts.get(JobStatus.FAILED, 0)
-        or counts.get(JobStatus.CANCELED, 0)
-        or counts.get(JobStatus.INTERRUPTED, 0)
-    ) else "info"
+    severity = "warning" if counts.get(JobStatus.FAILED, 0) or counts.get(JobStatus.INTERRUPTED, 0) else "info"
     return message, severity

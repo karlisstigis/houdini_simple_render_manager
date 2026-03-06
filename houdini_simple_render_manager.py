@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtSvg, QtWidgets
 from app_core.action_policy import (
     can_duplicate_jobs,
     can_edit_job,
@@ -130,22 +130,15 @@ from queue_core.queue_path_sync_lock import (
     end_path_sync_lock as end_path_sync_lock_model,
     is_job_path_sync_locked as is_job_path_sync_locked_model,
 )
-from queue_core.queue_header_grouping import (
-    is_valid_queue_header_grouping as is_valid_queue_header_grouping_model,
-    queue_column_widths_from_data as queue_column_widths_from_data_model,
-    queue_header_visual_order as queue_header_visual_order_model,
-    queue_hidden_columns_from_data as queue_hidden_columns_from_data_model,
-)
+from queue_core.queue_view_state_coordinator import QueueViewStateCoordinator
 from queue_core.queue_output_paths import (
     frame_sequence_path_for_frame as frame_sequence_path_for_frame_model,
     normalize_output_display_path as normalize_output_display_path_model,
     output_folder_from_value as output_folder_from_value_model,
 )
-from flows.queue_context_menu_flow import (
-    apply_job_mutation_with_history as apply_job_mutation_with_history_model,
-    build_queue_context_menu_availability as build_queue_context_menu_availability_model,
-    queue_context_action_key as queue_context_action_key_model,
-)
+from queue_core.queue_context_menu_coordinator import QueueContextMenuCoordinator
+from queue_core.queue_refresh_coordinator import QueueRefreshCoordinator
+from queue_core.queue_tree_context_menu_coordinator import QueueTreeContextMenuCoordinator
 from app_core.preview_paths import resolve_job_preview_path as resolve_job_preview_path_model
 from queue_core.queue_frame_scan import (
     first_missing_frame_and_contiguous_done as first_missing_frame_and_contiguous_done_model,
@@ -171,8 +164,8 @@ from queue_core.queue_tree_ui import (
     TREE_HIP_ROLE,
     TREE_KIND_ROLE,
     TREE_ROP_ROLE,
+    TREE_USED_ROLE,
     build_queue_tree_panel as build_queue_tree_panel_model,
-    refresh_queue_tree_model,
 )
 from queue_core.queue_tree_sync import (
     propagate_hip_path_change as propagate_hip_path_change_model,
@@ -206,8 +199,8 @@ from flows.job_properties_panel_flow import (
     build_job_properties_state_for_selection as build_job_properties_state_for_selection_model,
 )
 from render_core.render_session import RenderSessionController, RenderSessionHooks
-from app_core.recovery_reporting import build_startup_recovery_summary
 from houdini_core.scan_coordinator import ScanCoordinator, ScanCoordinatorHooks
+from houdini_core.tree_scan_coordinator import TreeScanCoordinator
 from render_core.render_output_parser import (
     detect_phase_from_output_with_job as detect_phase_from_output_with_job_model,
 )
@@ -267,9 +260,7 @@ from queue_core.queue_job_paths import (
 )
 from queue_core.queue_targeting import (
     current_job_by_id as current_job_by_id_model,
-    job_row_by_id as job_row_by_id_model,
     selected_job_for_row as selected_job_for_row_model,
-    selection_ids_for_refresh as selection_ids_for_refresh_model,
     tree_context_target_jobs as tree_context_target_jobs_model,
 )
 from queue_core.queue_model_text import queue_model_display_text as queue_model_display_text_model
@@ -282,16 +273,7 @@ from flows.queue_output_resolution_flow import (
     maybe_refresh_probe_path as maybe_refresh_probe_path_model,
     probe_pattern_resolved as probe_pattern_resolved_model,
 )
-from queue_core.queue_refresh_selection import (
-    clamped_select_row as clamped_select_row_model,
-    preserved_selection as preserved_selection_model,
-    target_selection as target_selection_model,
-)
-from queue_core.queue_refresh_defer import (
-    next_pending_refresh_action as next_pending_refresh_action_model,
-    pending_refresh_args as pending_refresh_args_model,
-    should_defer_queue_refresh as should_defer_queue_refresh_model,
-)
+from queue_core.queue_refresh_defer import should_defer_queue_refresh as should_defer_queue_refresh_model
 from queue_core.queue_start_control import (
     blocked_start_title as blocked_start_title_model,
     should_set_selected_rerun_status as should_set_selected_rerun_status_model,
@@ -301,10 +283,7 @@ from flows.queue_start_flow import (
     evaluate_job_start_preflight as evaluate_job_start_preflight_model,
     start_queue_mode as start_queue_mode_model,
 )
-from flows.queue_state_io import (
-    load_queue_state as load_queue_state_model,
-    save_queue_state as save_queue_state_model,
-)
+from queue_core.queue_state_coordinator import QueueStateCoordinator
 from render_core.render_environment_builder import (
     apply_device_env as apply_device_env_model,
     apply_retained_usd_env as apply_retained_usd_env_model,
@@ -315,8 +294,15 @@ from render_core.render_environment_builder import (
     should_reuse_existing_usd as should_reuse_existing_usd_model,
 )
 from ui_core.ui_state_rules import build_ui_state as build_ui_state_model
+from ui_core.window_layout_coordinator import WindowLayoutCoordinator
+from ui_core.panel_splitter_coordinator import PanelSplitterCoordinator
 from queue_core.queue_undo_redo import pop_history_for_shortcut as pop_history_for_shortcut_model
-from ui_core.theme_support import DEFAULT_THEME, build_app_stylesheet, ensure_theme_icons, normalize_theme_colors
+from ui_core.theme_support import (
+    DEFAULT_THEME,
+    build_app_stylesheet,
+    ensure_theme_icons,
+    normalize_theme_colors,
+)
 from ui_core.widgets import AddJobPanel, CleanStepSpinBox, JobPropertiesPanel, PanelFrame, PreferencesDialog, QueueTableItemDelegate, QueueTableWidget, RopListWidget
 from worker_core.worker_client import RenderWorkerClient, ScanWorkerClient
 
@@ -328,6 +314,14 @@ CONFIG_FILE_NAME = "config.json"
 THEME_FILE_NAME = "theme.json"
 HOUDINI_SCRIPTS_DIR_NAME = "houdini_scripts"
 LOGGER = logging.getLogger(__name__)
+UI_DEFERRED_NOW_MS = 0
+UI_DEFERRED_SETTLE_MS = 120
+TABLER_NOTIFICATION_ICONS_DIR = Path(__file__).resolve().parent / "assets" / "third_party" / "tabler"
+TABLER_NOTIFICATION_ICON_PATHS = {
+    "info": TABLER_NOTIFICATION_ICONS_DIR / "info-circle.svg",
+    "warning": TABLER_NOTIFICATION_ICONS_DIR / "alert-triangle.svg",
+    "error": TABLER_NOTIFICATION_ICONS_DIR / "alert-octagon.svg",
+}
 
 DEFAULT_QUEUE_COLUMN_WIDTHS: dict[int, int] = {
     QueueTableModel.NAME_COLUMN: 220,
@@ -502,6 +496,10 @@ def safe_message(parent: QtWidgets.QWidget, title: str, text: str, details: str 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self.setObjectName("mainWindow")
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
+        self.setUpdatesEnabled(False)
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(self._build_app_icon())
         self.resize(1280, 820)
@@ -511,6 +509,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.theme = self.config.load_theme()
         self._hbatch_path = ""
         self.jobs: list[RenderJob] = []
+        self._tree_rop_records_by_hip: dict[str, list[dict[str, Any]]] = {}
+        self._last_queue_job_id_order: list[str] = []
+        self._notification_icon_cache: dict[str, QtGui.QIcon] = {}
 
         self.current_job_id: str | None = None
         self.current_job_log_handle = None
@@ -536,6 +537,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pending_queue_refresh_timer = QtCore.QTimer(self)
         self._pending_queue_refresh_timer.setSingleShot(True)
         self._pending_queue_refresh_timer.timeout.connect(self._flush_pending_queue_refresh)
+        self._panel_width_reconcile_timer = QtCore.QTimer(self)
+        self._panel_width_reconcile_timer.setSingleShot(True)
+        self._panel_width_reconcile_timer.timeout.connect(self._reconcile_panel_widths)
+        self._pending_job_row_refresh_ids: set[str] = set()
+        self._pending_job_row_refresh_timer = QtCore.QTimer(self)
+        self._pending_job_row_refresh_timer.setSingleShot(True)
+        self._pending_job_row_refresh_timer.timeout.connect(self._flush_pending_job_row_refreshes)
+        self._last_job_status_by_id: dict[str, JobStatus] = {}
+        self._pending_queue_filter_selection_ids: list[str] = []
+        self._queue_filter_timer = QtCore.QTimer(self)
+        self._queue_filter_timer.setSingleShot(True)
+        self._queue_filter_timer.timeout.connect(self._apply_queue_filters)
         self._path_sync_overlay_progress = 0.0
         self._path_sync_overlay_timer = QtCore.QTimer(self)
         self._path_sync_overlay_timer.setInterval(40)
@@ -556,9 +569,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self._status_clear_timer.timeout.connect(lambda: self._set_status_message(self._status_default_message))
         self._main_splitter_left_width_pref: int | None = None
         self._main_splitter_left_collapsed = False
+        self._main_splitter_handle_drag_active = False
         self._applying_main_splitter_width = False
+        self._queue_properties_handle_drag_active = False
+        self._startup_layout_pending = True
+        self._startup_layout_finalize_scheduled = False
+        self._applying_panel_collapse_layout = False
+        self._panel_restore_sizes: dict[tuple[int, int], int] = {}
+        self._left_stack_splitter_sizes_pref: list[int] | None = None
+        self._left_stack_sizes_initialized = False
+        self._left_stack_user_resized_this_session = False
+        self._left_stack_scrollbar_visibility_cached: bool | None = None
+        self._left_pane_min_width_floor: int | None = None
+        self._left_pane_content_width_floor: int | None = None
+        self._left_pane_required_width_cached: int | None = None
+        self._applying_job_properties_splitter = False
         self._left_notifications_height_pref: int | None = None
         self._last_recovery_headline = ""
+        self._job_properties_last_state: dict[str, Any] | None = None
+        self.layout_coordinator = WindowLayoutCoordinator(self)
+        self.panel_splitters = PanelSplitterCoordinator(self)
+        self.queue_view_state = QueueViewStateCoordinator(self)
+        self.queue_context_menu = QueueContextMenuCoordinator(self)
+        self.queue_refresh = QueueRefreshCoordinator(self)
+        self.queue_tree_context_menu = QueueTreeContextMenuCoordinator(self)
+        self.queue_state = QueueStateCoordinator(self)
+        self.tree_scan = TreeScanCoordinator(self)
         self.scan_worker_client = ScanWorkerClient(
             worker_python_path=self._worker_python_path(),
             worker_script_path=self._worker_script_path("scan_worker.py"),
@@ -670,14 +706,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
+        central.setObjectName("mainWindowCentral")
+        central.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        central.setAutoFillBackground(True)
         self.setCentralWidget(central)
         root = QtWidgets.QVBoxLayout(central)
 
         self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         self.main_splitter.addWidget(self._build_left_panel())
         self.main_splitter.addWidget(self._build_right_panel())
-        self.main_splitter.setStretchFactor(0, 2)
-        self.main_splitter.setStretchFactor(1, 3)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        main_handle = self.main_splitter.handle(1)
+        if main_handle is not None:
+            main_handle.installEventFilter(self)
         self.main_splitter.splitterMoved.connect(self._on_main_splitter_moved)
         root.addWidget(self.main_splitter, stretch=1)
         root.addWidget(self._build_bottom_bar())
@@ -688,6 +730,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._main_splitter_left_width_pref = int(saved_left_width) if saved_left_width is not None else None
         except (TypeError, ValueError):
             self._main_splitter_left_width_pref = None
+        saved_left_pane_min_width = self.config.get("left_pane_min_width")
+        try:
+            self._left_pane_min_width_floor = (
+                int(saved_left_pane_min_width) if saved_left_pane_min_width is not None else None
+            )
+            if self._left_pane_min_width_floor is not None and self._left_pane_min_width_floor <= 0:
+                self._left_pane_min_width_floor = None
+        except (TypeError, ValueError):
+            self._left_pane_min_width_floor = None
         saved_top_height = self.config.get("left_splitter_top_height")
         try:
             self._left_splitter_top_height_pref = int(saved_top_height) if saved_top_height is not None else None
@@ -698,8 +749,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self._left_notifications_height_pref = int(saved_notifications_height) if saved_notifications_height is not None else None
         except (TypeError, ValueError):
             self._left_notifications_height_pref = None
-        QtCore.QTimer.singleShot(0, self._apply_main_splitter_left_width_pref)
-        QtCore.QTimer.singleShot(0, self._apply_left_splitter_default_sizes)
+        saved_left_stack_sizes = self.config.get("left_stack_splitter_sizes")
+        parsed_left_stack_sizes: list[int] | None = None
+        if isinstance(saved_left_stack_sizes, list):
+            try:
+                parsed = [max(0, int(v)) for v in saved_left_stack_sizes]
+                if len(parsed) == 4:
+                    parsed_left_stack_sizes = parsed
+            except Exception:
+                parsed_left_stack_sizes = None
+        self._left_stack_splitter_sizes_pref = parsed_left_stack_sizes
+
+    def safe_message(self, title: str, text: str, details: str | None = None) -> None:
+        safe_message(self, title, text, details)
+
+    def _schedule_deferred(self, callable_obj: Any, delay_ms: int) -> None:
+        QtCore.QTimer.singleShot(int(delay_ms), callable_obj)
+
+    def _schedule_now_and_settled(self, callable_obj: Any) -> None:
+        self._schedule_deferred(callable_obj, UI_DEFERRED_NOW_MS)
+        self._schedule_deferred(callable_obj, UI_DEFERRED_SETTLE_MS)
 
     def _begin_interaction_lock(self, status_text: str | None = None) -> None:
         self._interaction_block_depth += 1
@@ -748,6 +817,168 @@ class MainWindow(QtWidgets.QMainWindow):
             view.clearFocus()
         except Exception as exc:
             _log_suppressed_exception("MainWindow._prepare_view_for_locked_refresh.view_clear_focus", exc)
+
+    def _capture_main_splitter_left_width_pref(self) -> None:
+        width = self._current_main_splitter_left_width()
+        if width is None or width <= 0:
+            return
+        self._main_splitter_left_width_pref = int(width)
+
+    def _main_splitter_user_drag_active(self) -> bool:
+        return bool(self._main_splitter_handle_drag_active)
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        main_splitter = getattr(self, "main_splitter", None)
+        main_handle = main_splitter.handle(1) if main_splitter is not None else None
+        queue_splitter = getattr(self, "queue_properties_splitter", None)
+        queue_handle = queue_splitter.handle(1) if queue_splitter is not None else None
+        if watched is main_handle:
+            event_type = event.type()
+            if event_type == QtCore.QEvent.Type.MouseButtonPress:
+                mouse_event = event
+                if isinstance(mouse_event, QtGui.QMouseEvent) and mouse_event.button() == QtCore.Qt.MouseButton.LeftButton:
+                    self._main_splitter_handle_drag_active = True
+                    self.layout_coordinator.unlock_main_splitter_left_width_lock()
+            elif event_type in {
+                QtCore.QEvent.Type.MouseButtonRelease,
+                QtCore.QEvent.Type.Hide,
+            }:
+                self._main_splitter_handle_drag_active = False
+                self._capture_main_splitter_left_width_pref()
+                self.layout_coordinator.sync_main_splitter_left_width_lock()
+        elif watched is queue_handle:
+            event_type = event.type()
+            if event_type == QtCore.QEvent.Type.MouseButtonPress:
+                mouse_event = event
+                if isinstance(mouse_event, QtGui.QMouseEvent) and mouse_event.button() == QtCore.Qt.MouseButton.LeftButton:
+                    self._queue_properties_handle_drag_active = True
+                    self.layout_coordinator.unlock_job_properties_minimum_width_lock()
+            elif event_type in {
+                QtCore.QEvent.Type.MouseButtonRelease,
+                QtCore.QEvent.Type.Hide,
+            }:
+                self._queue_properties_handle_drag_active = False
+                self.layout_coordinator.sync_job_properties_minimum_width_lock()
+        return super().eventFilter(watched, event)
+
+    def _left_stack_content_margin(self) -> int:
+        return self.layout_coordinator.left_stack_content_margin()
+
+    def _left_stack_scrollbar_gap(self) -> int:
+        return self.layout_coordinator.left_stack_scrollbar_gap()
+
+    def _apply_startup_minimum_panel_widths(self) -> None:
+        self.layout_coordinator.apply_startup_minimum_panel_widths()
+
+    def _panel_width_batch_widgets(self, *, include_window: bool = False) -> list[QtWidgets.QWidget]:
+        widgets: list[QtWidgets.QWidget] = []
+        if include_window:
+            widgets.append(self)
+        for widget in (
+            self.centralWidget(),
+            getattr(self, "main_splitter", None),
+            getattr(self, "left_stack_scroll", None),
+            getattr(self, "queue_properties_splitter", None),
+            getattr(self, "right_vertical_splitter", None),
+        ):
+            if isinstance(widget, QtWidgets.QWidget):
+                widgets.append(widget)
+        return widgets
+
+    @staticmethod
+    def _run_with_updates_suppressed(
+        widgets: list[QtWidgets.QWidget],
+        action: Callable[[], None],
+    ) -> None:
+        for widget in widgets:
+            widget.setUpdatesEnabled(False)
+        try:
+            action()
+        finally:
+            for widget in reversed(widgets):
+                widget.setUpdatesEnabled(True)
+                widget.update()
+
+    def _finalize_startup_layout(self) -> None:
+        if not self._startup_layout_pending:
+            return
+        self._startup_layout_finalize_scheduled = False
+        self._panel_width_reconcile_timer.stop()
+        def _finalize() -> None:
+            self._update_left_panel_expanded_min_heights()
+            self._sync_left_stack_scrollbar_compensation()
+            self._capture_left_pane_min_width_floor()
+            self._apply_startup_minimum_panel_widths()
+            self._apply_main_splitter_left_width_pref()
+            self._apply_left_stack_splitter_default_sizes()
+            self._capture_main_splitter_left_width_pref()
+            self._reconcile_panel_widths()
+            self._startup_layout_pending = False
+        self._run_with_updates_suppressed(self._panel_width_batch_widgets(include_window=True), _finalize)
+        self.update()
+
+    def _schedule_panel_width_reconcile(self, delay_ms: int = 0) -> None:
+        self.layout_coordinator.schedule_panel_width_reconcile(delay_ms)
+
+    def _reconcile_panel_widths(self) -> None:
+        self._run_with_updates_suppressed(
+            self._panel_width_batch_widgets(),
+            self.layout_coordinator.reconcile_panel_widths,
+        )
+
+    def _apply_main_splitter_left_minimum_width(self) -> None:
+        self.layout_coordinator.apply_main_splitter_left_minimum_width()
+
+    def _job_properties_min_width(self) -> int:
+        return self.layout_coordinator.job_properties_min_width()
+
+    def _job_properties_collapse_threshold(self) -> int:
+        return self.layout_coordinator.job_properties_collapse_threshold()
+
+    def _job_properties_target_width(self, *, current_width: int, total_width: int) -> int:
+        return self.layout_coordinator.job_properties_target_width(
+            current_width=current_width,
+            total_width=total_width,
+        )
+
+    def _set_queue_properties_sizes(self, left_width: int, right_width: int) -> None:
+        self.layout_coordinator.set_queue_properties_sizes(left_width, right_width)
+
+    def _collapse_job_properties_panel(self, *, total_width: int, remembered_width: int | None = None) -> None:
+        self.layout_coordinator.collapse_job_properties_panel(
+            total_width=total_width,
+            remembered_width=remembered_width,
+        )
+
+    def _restore_job_properties_panel(self, *, total_width: int, fallback_width: int | None = None) -> None:
+        self.layout_coordinator.restore_job_properties_panel(
+            total_width=total_width,
+            fallback_width=fallback_width,
+        )
+
+    def _apply_job_properties_minimum_width(self) -> None:
+        self.layout_coordinator.apply_job_properties_minimum_width()
+
+    def _compute_left_pane_content_required_width(self) -> int | None:
+        return self.layout_coordinator.compute_left_pane_content_required_width()
+
+    def _compute_left_pane_required_width(self) -> int | None:
+        return self.layout_coordinator.compute_left_pane_required_width()
+
+    def _enforce_left_pane_min_width_floor(self) -> None:
+        self.layout_coordinator.enforce_left_pane_min_width_floor()
+
+    def _capture_left_pane_min_width_floor(self) -> None:
+        self.layout_coordinator.capture_left_pane_min_width_floor()
+
+    def _left_stack_scrollbar_visible(self) -> bool:
+        return self.layout_coordinator.left_stack_scrollbar_visible()
+
+    def _sync_left_stack_scrollbar_compensation(self) -> None:
+        self.layout_coordinator.sync_left_stack_scrollbar_compensation()
+
+    def _on_left_stack_scroll_metrics_changed(self) -> None:
+        self.layout_coordinator.on_left_stack_scroll_metrics_changed()
 
     @staticmethod
     def _dropped_hip_path(event: QtGui.QDropEvent | QtGui.QDragEnterEvent) -> str | None:
@@ -1088,58 +1319,122 @@ class MainWindow(QtWidgets.QMainWindow):
             self._status_clear_timer.stop()
 
     def _apply_left_splitter_default_sizes(self) -> None:
-        splitter = getattr(self, "left_vertical_splitter", None)
-        create_panel = getattr(self, "create_job_frame", None)
-        if splitter is None or create_panel is None:
-            return
-        total_height = splitter.height()
-        if total_height <= 0:
-            total_height = splitter.sizeHint().height()
-        if total_height <= 0:
-            return
-        preferred_top = getattr(self, "_left_splitter_top_height_pref", None)
-        top_target = preferred_top if preferred_top is not None else max(
-            create_panel.minimumSizeHint().height(),
-            create_panel.sizeHint().height(),
-        )
-        top_target = max(1, min(top_target, max(1, total_height - 80)))
-        bottom_target = max(1, total_height - top_target)
-        splitter.setSizes([top_target, bottom_target])
+        self.panel_splitters.apply_left_splitter_default_sizes()
 
     def _apply_left_column_splitter_default_sizes(self) -> None:
-        splitter = getattr(self, "left_column_splitter", None)
-        notifications_panel = getattr(self, "notifications_frame", None)
-        if splitter is None or notifications_panel is None:
-            return
-        total_height = splitter.height()
-        if total_height <= 0:
-            total_height = splitter.sizeHint().height()
-        if total_height <= 0:
-            return
-        preferred_bottom = getattr(self, "_left_notifications_height_pref", None)
-        bottom_target = preferred_bottom if preferred_bottom is not None else max(
-            notifications_panel.minimumSizeHint().height(),
-            min(170, notifications_panel.sizeHint().height()),
+        self.panel_splitters.apply_left_column_splitter_default_sizes()
+
+    def _apply_left_stack_splitter_default_sizes(self) -> None:
+        self.panel_splitters.apply_left_stack_splitter_default_sizes()
+
+    def _update_create_job_panel_height_cap(self) -> None:
+        self.panel_splitters.update_create_job_panel_height_cap()
+
+    def _update_left_panel_expanded_min_heights(self) -> None:
+        self.panel_splitters.update_left_panel_expanded_min_heights()
+
+    def _apply_left_stack_panel_heights(self, panel_pref: list[int] | tuple[int, int, int]) -> None:
+        self.panel_splitters.apply_left_stack_panel_heights(panel_pref)
+
+    def _register_collapsible_panel(
+        self,
+        panel: QtWidgets.QWidget | None,
+        splitter: QtWidgets.QSplitter | None,
+        index: int,
+    ) -> None:
+        self.panel_splitters.register_collapsible_panel(panel, splitter, index)
+
+    def _on_panel_expanded_changed(
+        self,
+        panel: PanelFrame,
+        splitter: QtWidgets.QSplitter,
+        index: int,
+        expanded: bool,
+    ) -> None:
+        self.panel_splitters.on_panel_expanded_changed(panel, splitter, index, expanded)
+
+    def _on_left_stack_panel_expanded_changed(self, panel: PanelFrame, index: int, expanded: bool) -> None:
+        self.panel_splitters.on_left_stack_panel_expanded_changed(panel, index, expanded)
+
+    def _current_main_splitter_left_width(self) -> int | None:
+        return self.panel_splitters.current_main_splitter_left_width()
+
+    def _restore_main_splitter_left_width_deferred(self, left_width: int) -> None:
+        self.panel_splitters.restore_main_splitter_left_width_deferred(left_width)
+
+    def _restore_main_splitter_left_width(self, left_width: int) -> None:
+        self.panel_splitters.restore_main_splitter_left_width(left_width)
+
+    def _pack_left_column_top(self) -> None:
+        self.panel_splitters.pack_left_column_top()
+
+    def _apply_splitter_sizes(self, splitter: QtWidgets.QSplitter, sizes: list[int] | tuple[int, ...]) -> None:
+        self.panel_splitters.apply_splitter_sizes(splitter, sizes)
+
+    def _handle_right_queue_logs_special_toggle(
+        self,
+        *,
+        splitter: QtWidgets.QSplitter,
+        index: int,
+        expanded: bool,
+        total: int,
+        top_widget: PanelFrame,
+        bottom_widget: PanelFrame,
+    ) -> bool:
+        return self.panel_splitters._handle_right_queue_logs_special_toggle(
+            splitter=splitter,
+            index=index,
+            expanded=expanded,
+            total=total,
+            top_widget=top_widget,
+            bottom_widget=bottom_widget,
         )
-        bottom_target = max(80, min(bottom_target, max(80, total_height - 160)))
-        top_target = max(120, total_height - bottom_target)
-        splitter.setSizes([top_target, bottom_target])
+
+    def _rebalance_splitter_for_panel_toggle(
+        self,
+        *,
+        panel: PanelFrame,
+        splitter: QtWidgets.QSplitter,
+        index: int,
+        expanded: bool,
+    ) -> None:
+        self.panel_splitters.rebalance_splitter_for_panel_toggle(
+            panel=panel,
+            splitter=splitter,
+            index=index,
+            expanded=expanded,
+        )
 
     def _on_left_splitter_moved(self, _pos: int, _index: int) -> None:
-        splitter = getattr(self, "left_vertical_splitter", None)
-        if splitter is None:
-            return
-        sizes = splitter.sizes()
-        if len(sizes) >= 2:
-            self._left_splitter_top_height_pref = int(max(0, sizes[0]))
+        self.panel_splitters.on_left_splitter_moved()
 
     def _on_left_column_splitter_moved(self, _pos: int, _index: int) -> None:
-        splitter = getattr(self, "left_column_splitter", None)
-        if splitter is None:
-            return
-        sizes = splitter.sizes()
-        if len(sizes) >= 2:
-            self._left_notifications_height_pref = int(max(0, sizes[1]))
+        self.panel_splitters.on_left_column_splitter_moved()
+
+    def _on_left_stack_splitter_moved(self, _pos: int, _index: int) -> None:
+        self.panel_splitters.on_left_stack_splitter_moved()
+
+    def _on_right_splitter_moved(self, _pos: int, _index: int) -> None:
+        self.panel_splitters.on_right_splitter_moved()
+
+    def _maybe_auto_collapse_splitter_panel(
+        self,
+        *,
+        splitter: QtWidgets.QSplitter,
+        sizes: list[int] | tuple[int, ...],
+        index: int,
+    ) -> bool:
+        return self.panel_splitters.maybe_auto_collapse_splitter_panel(
+            splitter=splitter,
+            sizes=sizes,
+            index=index,
+        )
+
+    def _maintain_left_stack_top_pack(self) -> None:
+        self.panel_splitters.maintain_left_stack_top_pack()
+
+    def _auto_collapse_left_stack_panels_from_sizes(self, sizes: list[int] | tuple[int, ...]) -> bool:
+        return self.panel_splitters.auto_collapse_left_stack_panels_from_sizes(sizes)
 
     def _chunking_enabled(self) -> bool:
         return self._experimental_chunking_enabled() and bool(getattr(self, "chk_enable_chunking", None) and self.chk_enable_chunking.isChecked())
@@ -1432,6 +1727,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not hasattr(self, "main_splitter") or self.main_splitter is None:
             return
+        if not self._main_splitter_user_drag_active():
+            return
         sizes = self.main_splitter.sizes()
         if len(sizes) >= 2:
             if sizes[0] <= 0:
@@ -1461,10 +1758,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.main_splitter.setSizes([target_left, target_right])
             finally:
                 self._applying_main_splitter_width = False
+            self.layout_coordinator.sync_main_splitter_left_width_lock()
             return
         if self._main_splitter_left_width_pref is None:
             if sizes[0] > 0:
                 self._main_splitter_left_width_pref = int(sizes[0])
+            self.layout_coordinator.sync_main_splitter_left_width_lock()
             return
         left_widget = self.main_splitter.widget(0)
         right_widget = self.main_splitter.widget(1)
@@ -1479,6 +1778,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.main_splitter.setSizes([target_left, target_right])
         finally:
             self._applying_main_splitter_width = False
+        self.layout_coordinator.sync_main_splitter_left_width_lock()
 
     def _build_job_create_panel(self) -> QtWidgets.QWidget:
         self.add_job_panel = AddJobPanel(self.config)
@@ -1486,34 +1786,61 @@ class MainWindow(QtWidgets.QMainWindow):
         self.add_job_panel.setTitle("")
         self.add_job_panel.add_job_requested.connect(self._handle_add_job_requested)
         self.add_job_panel.scan_requested.connect(self._handle_scan_requested)
-        self.create_job_frame = PanelFrame("Create Job", self.add_job_panel)
+        self.create_job_frame = PanelFrame("Create Job", self.add_job_panel, collapsible=True)
         return self.create_job_frame
 
     def _build_left_panel(self) -> QtWidgets.QWidget:
         host = QtWidgets.QWidget()
+        host.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        host.setAutoFillBackground(True)
+        self.left_panel_host = host
         layout = QtWidgets.QVBoxLayout(host)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        top_host = QtWidgets.QWidget()
-        top_layout = QtWidgets.QVBoxLayout(top_host)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(6)
-        self.left_vertical_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        self.left_vertical_splitter.addWidget(self._build_job_create_panel())
-        self.left_vertical_splitter.addWidget(self._build_tree_view_panel())
-        self.left_vertical_splitter.setStretchFactor(0, 4)
-        self.left_vertical_splitter.setStretchFactor(1, 2)
-        self.left_vertical_splitter.splitterMoved.connect(self._on_left_splitter_moved)
-        top_layout.addWidget(self.left_vertical_splitter, 1)
+        self.left_stack_host = QtWidgets.QWidget()
+        self.left_stack_host.setObjectName("transparentHost")
+        self.left_stack_layout = QtWidgets.QVBoxLayout(self.left_stack_host)
+        content_margin = self._left_stack_content_margin()
+        self.left_stack_layout.setContentsMargins(content_margin, 0, content_margin, 0)
+        self.left_stack_layout.setSpacing(6)
+        self.left_stack_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+        self.left_stack_layout.addWidget(self._build_job_create_panel())
+        self.left_stack_layout.addWidget(self._build_tree_view_panel())
+        self.left_stack_layout.addWidget(self._build_notifications_panel(), 1)
 
-        self.left_column_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        self.left_column_splitter.addWidget(top_host)
-        self.left_column_splitter.addWidget(self._build_notifications_panel())
-        self.left_column_splitter.setStretchFactor(0, 5)
-        self.left_column_splitter.setStretchFactor(1, 2)
-        self.left_column_splitter.splitterMoved.connect(self._on_left_column_splitter_moved)
-        layout.addWidget(self.left_column_splitter, 1)
+        self.left_stack_scroll = QtWidgets.QScrollArea()
+        self.left_stack_scroll.setObjectName("leftPaneScroll")
+        self.left_stack_scroll.setWidgetResizable(True)
+        self.left_stack_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.left_stack_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.left_stack_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.left_stack_scroll.setWidget(self.left_stack_host)
+        left_vbar = self.left_stack_scroll.verticalScrollBar()
+        if left_vbar is not None:
+            left_vbar.rangeChanged.connect(lambda *_args: self._on_left_stack_scroll_metrics_changed())
+        self.create_job_frame.expanded_changed.connect(
+            lambda expanded, p=self.create_job_frame, i=0: self._on_left_stack_panel_expanded_changed(p, i, expanded)
+        )
+        self.tree_view_frame.expanded_changed.connect(
+            lambda expanded, p=self.tree_view_frame, i=1: self._on_left_stack_panel_expanded_changed(p, i, expanded)
+        )
+        self.notifications_frame.expanded_changed.connect(
+            lambda expanded, p=self.notifications_frame, i=2: self._on_left_stack_panel_expanded_changed(p, i, expanded)
+        )
+        compact_panel_policy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Maximum)
+        self.create_job_frame.setSizePolicy(compact_panel_policy)
+        self.create_job_frame.set_expanded_size_policy(compact_panel_policy)
+        self.tree_view_frame.setSizePolicy(compact_panel_policy)
+        self.tree_view_frame.set_expanded_size_policy(compact_panel_policy)
+        self._update_left_panel_expanded_min_heights()
+        fill_panel_policy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
+        self.notifications_frame.setSizePolicy(fill_panel_policy)
+        self.notifications_frame.set_expanded_size_policy(fill_panel_policy)
+        self.notifications_frame.set_keep_expanding_when_collapsed(False)
+        layout.addWidget(self.left_stack_scroll, 1)
+        self._sync_left_stack_scrollbar_compensation()
+        self._capture_left_pane_min_width_floor()
         return host
 
     def _build_notifications_panel(self) -> QtWidgets.QWidget:
@@ -1522,6 +1849,15 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        header_row = QtWidgets.QHBoxLayout()
+        header_row.setContentsMargins(8, 8, 8, 8)
+        header_row.setSpacing(8)
+        self.btn_clear_notifications = QtWidgets.QPushButton("Clear")
+        self.btn_clear_notifications.clicked.connect(self._clear_notifications_view_only)
+        header_row.addWidget(self.btn_clear_notifications)
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
+
         self.notifications_list = RopListWidget()
         self.notifications_list.setObjectName("notificationsList")
         self.notifications_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
@@ -1529,31 +1865,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.notifications_list.setUniformItemSizes(False)
         self.notifications_list.setWordWrap(True)
         self.notifications_list.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.notifications_list.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
+        self.notifications_list.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.notifications_list.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.notifications_list.verticalScrollBar().setSingleStep(20)
         layout.addWidget(self.notifications_list, 1)
 
-        footer_row = QtWidgets.QHBoxLayout()
-        footer_row.setContentsMargins(8, 8, 8, 8)
-        footer_row.setSpacing(8)
-        self.btn_clear_notifications = QtWidgets.QPushButton("Clear")
-        self.btn_clear_notifications.clicked.connect(self._clear_notifications_view_only)
-        footer_row.addWidget(self.btn_clear_notifications)
-        footer_row.addStretch(1)
-        layout.addLayout(footer_row)
-
         box.setObjectName("panelEmbeddedGroup")
         box.setTitle("")
-        self.notifications_frame = PanelFrame("Notifications", box)
+        self.notifications_frame = PanelFrame("Notifications", box, collapsible=True)
         self.notifications_frame.set_body_margins(0, 0, 0, 0)
         return self.notifications_frame
 
     def _build_tree_view_panel(self) -> QtWidgets.QWidget:
-        panel, self.queue_tree, self.queue_tree_model, self.btn_reload_all_tree = build_queue_tree_panel_model(
+        panel, self.queue_tree, self.queue_tree_model, self.btn_reload_all_tree, self.chk_tree_show_used_only = build_queue_tree_panel_model(
             self,
             item_changed_handler=self._on_queue_tree_item_changed,
         )
         self.btn_reload_all_tree.clicked.connect(self._reload_all_jobs_from_files)
+        raw_show_used_only = self.config.get("tree_show_used_only", True)
+        show_used_only = bool(raw_show_used_only)
+        if isinstance(raw_show_used_only, str):
+            show_used_only = raw_show_used_only.strip().lower() not in {"0", "false", "off", "no"}
+        self.chk_tree_show_used_only.setChecked(show_used_only)
+        self.chk_tree_show_used_only.toggled.connect(self._on_tree_show_used_only_toggled)
         self.tree_view_frame = panel
         return panel
 
@@ -1746,18 +2081,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.queue_table.setLineWidth(0)
         self.queue_table.setMidLineWidth(0)
 
-        queue_table_host = QtWidgets.QWidget()
-        queue_table_layout = QtWidgets.QVBoxLayout(queue_table_host)
-        queue_table_layout.setContentsMargins(0, 0, 0, 0)
-        queue_table_layout.setSpacing(0)
-        queue_table_layout.addWidget(self.queue_table)
+        self.queue_table_host = QtWidgets.QWidget()
+        self.queue_table_layout = QtWidgets.QVBoxLayout(self.queue_table_host)
+        self.queue_table_layout.setContentsMargins(0, 0, 0, 0)
+        self.queue_table_layout.setSpacing(0)
+        self.queue_table_layout.addWidget(self.queue_table)
 
         queue_left_host = QtWidgets.QWidget()
+        queue_left_host.setMinimumWidth(0)
         queue_left_layout = QtWidgets.QVBoxLayout(queue_left_host)
         queue_left_layout.setContentsMargins(0, 0, 0, 0)
         queue_left_layout.setSpacing(0)
         queue_left_layout.addWidget(controls_host)
-        queue_left_layout.addWidget(queue_table_host, 1)
+        queue_left_layout.addWidget(self.queue_table_host, 1)
 
         self.job_properties_panel = JobPropertiesPanel(self)
         self.job_properties_panel.device_mode_changed.connect(self._on_job_properties_device_mode_changed)
@@ -1769,21 +2105,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.job_properties_panel.usd_output_directory_custom_path_changed.connect(self._on_job_properties_usd_output_directory_custom_path_changed)
         self.job_properties_panel.reveal_retained_usd_requested.connect(self._reveal_selected_retained_usd)
         self.job_properties_panel.delete_retained_usd_requested.connect(self._delete_selected_retained_usd)
-        self.job_properties_frame = PanelFrame("Job Properties", self.job_properties_panel)
+        self.job_properties_frame = PanelFrame("Job Properties", self.job_properties_panel, scrollable_body=True)
         self.job_properties_frame.setObjectName("jobPropertiesFrame")
         self.job_properties_frame.set_body_margins(0, 0, 0, 0)
+        self.job_properties_panel.setMinimumWidth(0)
+        self.job_properties_frame.setMinimumWidth(0)
+        job_properties_min_width = int(self._job_properties_min_width())
 
         self.queue_properties_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         self.queue_properties_splitter.addWidget(queue_left_host)
         self.queue_properties_splitter.addWidget(self.job_properties_frame)
+        self.queue_properties_splitter.setChildrenCollapsible(True)
+        self.queue_properties_splitter.setCollapsible(0, False)
+        self.queue_properties_splitter.setCollapsible(1, True)
         self.queue_properties_splitter.setStretchFactor(0, 5)
         self.queue_properties_splitter.setStretchFactor(1, 2)
-        self.queue_properties_splitter.setSizes([940, 320])
+        self.queue_properties_splitter.setSizes([940, job_properties_min_width])
+        self._job_properties_last_width = int(job_properties_min_width)
+        queue_handle = self.queue_properties_splitter.handle(1)
+        if queue_handle is not None:
+            queue_handle.installEventFilter(self)
+        self.queue_properties_splitter.splitterMoved.connect(self._on_queue_properties_splitter_moved)
         layout.addWidget(self.queue_properties_splitter, 1)
 
         box.setObjectName("panelEmbeddedGroup")
         box.setTitle("")
-        panel = PanelFrame("Render Queue", box)
+        panel = PanelFrame("Render Queue", box, collapsible=True)
         panel.set_body_margins(0, 0, 0, 0)
         return panel
 
@@ -1793,42 +2140,32 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if isinstance(focus_widget, QtWidgets.QComboBox) and focus_widget.isEditable():
             return
-        splitter = getattr(self, "queue_properties_splitter", None)
-        panel = getattr(self, "job_properties_panel", None)
-        if splitter is None or panel is None:
-            return
-        sizes = splitter.sizes()
-        if len(sizes) < 2:
-            return
-        total = max(sum(sizes), 1)
-        panel_has_focus = bool(focus_widget is not None and (focus_widget is panel or panel.isAncestorOf(focus_widget)))
-        if sizes[1] > 24 and panel_has_focus:
-            self._job_properties_last_width = max(int(sizes[1]), 280)
-            splitter.setSizes([total, 0])
-            if getattr(self, "queue_table", None) is not None:
-                self.queue_table.setFocus(QtCore.Qt.FocusReason.ShortcutFocusReason)
-            return
-        if sizes[1] <= 24:
-            right = max(int(getattr(self, "_job_properties_last_width", 320) or 320), 280)
-            right = min(right, max(280, total - 220))
-            left = max(1, total - right)
-            splitter.setSizes([left, right])
-        if getattr(panel, "device_mode_combo", None) is not None and panel.device_mode_combo.isEnabled():
-            panel.device_mode_combo.setFocus(QtCore.Qt.FocusReason.ShortcutFocusReason)
-        else:
-            panel.setFocus(QtCore.Qt.FocusReason.ShortcutFocusReason)
+        self.layout_coordinator.toggle_job_properties_panel(focus_widget)
+
+    def _on_queue_properties_splitter_moved(self, _pos: int, _index: int) -> None:
+        self.layout_coordinator.on_queue_properties_splitter_moved()
 
     def _build_right_panel(self) -> QtWidgets.QWidget:
         host = QtWidgets.QWidget()
+        host.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        host.setAutoFillBackground(True)
         layout = QtWidgets.QVBoxLayout(host)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
+        self.queue_frame = self._build_queue_panel()
+        self.logs_frame = self._build_log_panel()
         self.right_vertical_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        self.right_vertical_splitter.addWidget(self._build_queue_panel())
-        self.right_vertical_splitter.addWidget(self._build_log_panel())
+        self.right_vertical_splitter.addWidget(self.queue_frame)
+        self.right_vertical_splitter.addWidget(self.logs_frame)
+        self.right_vertical_splitter.setChildrenCollapsible(False)
+        self.right_vertical_splitter.setCollapsible(0, False)
+        self.right_vertical_splitter.setCollapsible(1, False)
         self.right_vertical_splitter.setStretchFactor(0, 4)
         self.right_vertical_splitter.setStretchFactor(1, 2)
+        self.right_vertical_splitter.splitterMoved.connect(self._on_right_splitter_moved)
+        self._register_collapsible_panel(self.queue_frame, self.right_vertical_splitter, 0)
+        self._register_collapsible_panel(self.logs_frame, self.right_vertical_splitter, 1)
         layout.addWidget(self.right_vertical_splitter, 1)
         return host
 
@@ -1863,7 +2200,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.log_output)
         box.setObjectName("panelEmbeddedGroup")
         box.setTitle("")
-        return PanelFrame("Logs", box)
+        return PanelFrame("Logs", box, collapsible=True, scrollable_body=True)
 
     def _load_hbatch_path(self) -> None:
         configured = str(self.config.get("hbatch_path", "") or "").strip()
@@ -1971,39 +2308,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.queue_file_controller.update_window_title()
 
     def _load_queue_from_path(self, path: Path) -> bool:
-        try:
-            loaded_jobs, queue_view, active_job_id = load_queue_state_model(
-                path,
-                load_queue_payload_fn=load_queue_payload,
-                job_from_persisted_dict_fn=lambda item, active_id: self._job_from_persisted_dict(
-                    item,
-                    active_job_id=active_id,
-                ),
-            )
-            self.jobs = loaded_jobs
-            self._set_current_queue_file_path(path)
-            self._reset_queue_view_to_defaults()
-            self._apply_queue_view_from_persisted_data(queue_view)
-            self._clear_history()
-            recovery_summary = build_startup_recovery_summary(self.jobs)
-            if self.jobs:
-                self._refresh_queue_table(select_row=0)
-            else:
-                self._refresh_queue_table()
-            if recovery_summary is not None:
-                self._last_recovery_headline = recovery_summary.headline
-                self._append_notification_message(recovery_summary.headline, "warning")
-                self._append_log("Stderr", f"[Recovery] {recovery_summary.headline}\n")
-                for notice in recovery_summary.notices:
-                    self._append_notification_message(notice.message, notice.severity)
-                    self._append_log("Stderr", f"[Recovery] {notice.technical_message}\n")
-                self._set_status_message(recovery_summary.headline, 6000)
-            else:
-                self._last_recovery_headline = ""
-            return True
-        except Exception as exc:
-            self._append_log("Stderr", f"[Queue] Failed to load queue: {exc}\n")
-            return False
+        return self.queue_state.load_queue_from_path(path)
 
     def _queue_file_dialog_start_dir(self) -> str:
         return self.queue_file_controller.queue_file_dialog_start_dir()
@@ -2031,6 +2336,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.left_vertical_splitter.setHandleWidth(panel_gap)
         if hasattr(self, "left_column_splitter"):
             self.left_column_splitter.setHandleWidth(panel_gap)
+        if hasattr(self, "left_stack_splitter"):
+            self.left_stack_splitter.setHandleWidth(panel_gap)
         if hasattr(self, "right_vertical_splitter"):
             self.right_vertical_splitter.setHandleWidth(panel_gap)
         if hasattr(self, "queue_properties_splitter"):
@@ -2040,6 +2347,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.queue_table.selection_row_color = QtGui.QColor(t["selection_row"])
             self.queue_table.selection_row_alt_color = QtGui.QColor(t["selection_row_alt"])
             self.queue_table.selection_overlay_opacity = int(t.get("selection_overlay_opacity", 95))
+            self.queue_table.path_sync_overlay_opacity = int(t.get("path_sync_overlay_opacity", 28))
             self.queue_table.selection_line_enabled = bool(t.get("selection_line_enabled", True))
             self.queue_table.selection_line_thickness = int(t.get("selection_line_thickness", 1))
             self.queue_table.progress_usd_build_color = QtGui.QColor(t["progress_usd_build"])
@@ -2058,6 +2366,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "queue_file_menu_button"):
             self.queue_file_menu_button.setIcon(self._queue_menu_icon())
         self._update_bottom_legend_icons()
+        if self._startup_layout_pending:
+            return
+        self._schedule_panel_width_reconcile()
 
     def _hbatch_exists(self) -> bool:
         path = self._current_hbatch_path()
@@ -2663,34 +2974,37 @@ class MainWindow(QtWidgets.QMainWindow):
         checked_state = int(getattr(QtCore.Qt.CheckState.Checked, "value", QtCore.Qt.CheckState.Checked))
         partial_state = int(getattr(QtCore.Qt.CheckState.PartiallyChecked, "value", QtCore.Qt.CheckState.PartiallyChecked))
         selected_jobs = self._selected_jobs()
-        panel.set_state(
-            build_job_properties_state_for_selection_model(
-                selected_jobs=selected_jobs,
-                panel_default_state=self._job_properties_panel_default_state,
-                mixed_value=self._mixed_value,
-                job_file_name=self._job_file_name,
-                job_rop_name=self._job_rop_name,
-                single_job_retained_state=self._single_job_retained_usd_panel_state,
-                selected_retained_paths=self._selected_retained_usd_paths,
-                can_edit_job_for_panel=lambda job: can_edit_job(
-                    job,
-                    is_active_job=self._is_active_job(job),
-                    is_locked=self._is_job_path_sync_locked(job),
-                ).allowed,
-                device_option_states_for_jobs=lambda jobs, show_custom_devices, editable: self._device_option_states_for_jobs(
-                    jobs,
-                    show_custom_devices=show_custom_devices,
-                    editable=editable,
-                ),
-                is_active_job=self._is_active_job,
-                is_locked_job=self._is_job_path_sync_locked,
-                unchecked_state=unchecked_state,
-                checked_state=checked_state,
-                partial_state=partial_state,
-                default_device_mode=DeviceOverrideMode.DEFAULT.value,
-                default_usd_output_mode=UsdOutputDirectoryMode.DEFAULT_TEMP.value,
-            )
+        next_state = build_job_properties_state_for_selection_model(
+            selected_jobs=selected_jobs,
+            panel_default_state=self._job_properties_panel_default_state,
+            mixed_value=self._mixed_value,
+            job_file_name=self._job_file_name,
+            job_rop_name=self._job_rop_name,
+            single_job_retained_state=self._single_job_retained_usd_panel_state,
+            selected_retained_paths=self._selected_retained_usd_paths,
+            can_edit_job_for_panel=lambda job: can_edit_job(
+                job,
+                is_active_job=self._is_active_job(job),
+                is_locked=self._is_job_path_sync_locked(job),
+            ).allowed,
+            device_option_states_for_jobs=lambda jobs, show_custom_devices, editable: self._device_option_states_for_jobs(
+                jobs,
+                show_custom_devices=show_custom_devices,
+                editable=editable,
+            ),
+            is_active_job=self._is_active_job,
+            is_locked_job=self._is_job_path_sync_locked,
+            unchecked_state=unchecked_state,
+            checked_state=checked_state,
+            partial_state=partial_state,
+            default_device_mode=DeviceOverrideMode.DEFAULT.value,
+            default_usd_output_mode=UsdOutputDirectoryMode.DEFAULT_TEMP.value,
         )
+        last_state = getattr(self, "_job_properties_last_state", None)
+        if last_state == next_state:
+            return
+        panel.set_state(next_state)
+        self._job_properties_last_state = next_state
 
     def _apply_job_property_edit_spec(self, spec: JobPropertyEditSpec) -> None:
         property_name, apply_fn = spec
@@ -2812,31 +3126,53 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _on_queue_filter_changed(self) -> None:
+        self._pending_queue_filter_selection_ids = self._selected_job_ids()
+        self._queue_filter_timer.start(180)
+
+    def _apply_queue_filters(self) -> None:
         proxy = self._queue_proxy_model()
         if proxy is None:
             return
-        selected_ids = self._selected_job_ids()
+        selected_ids = list(self._pending_queue_filter_selection_ids)
+        self._pending_queue_filter_selection_ids = []
         proxy.set_search_text(self.queue_search_edit.text() if hasattr(self, "queue_search_edit") else "")
         current_value = ""
         if hasattr(self, "queue_status_filter") and self.queue_status_filter is not None:
             current_value = str(self.queue_status_filter.currentData() or "")
         proxy.set_status_filter(current_value)
         proxy.set_enabled_only(False)
-        self._refresh_queue_table(select_job_ids=selected_ids or None)
+        if selected_ids:
+            selected_id_set = set(selected_ids)
+            selection_model = self.queue_table.selectionModel()
+            if selection_model is not None:
+                blocker = QtCore.QSignalBlocker(selection_model)
+                try:
+                    self.queue_table.clearSelection()
+                    first_idx = QtCore.QModelIndex()
+                    for row, job in enumerate(self.jobs):
+                        if job.id not in selected_id_set:
+                            continue
+                        model_idx = self._queue_view_index_from_source_row(row, 0)
+                        if not model_idx.isValid():
+                            continue
+                        selection_model.select(
+                            model_idx,
+                            QtCore.QItemSelectionModel.SelectionFlag.Select
+                            | QtCore.QItemSelectionModel.SelectionFlag.Rows,
+                        )
+                        if not first_idx.isValid():
+                            first_idx = model_idx
+                    if first_idx.isValid():
+                        selection_model.setCurrentIndex(first_idx, QtCore.QItemSelectionModel.SelectionFlag.NoUpdate)
+                finally:
+                    del blocker
+            self._on_queue_selection_changed()
+            return
+        self._update_job_properties_panel()
         self._refresh_ui_state()
 
     def _flush_pending_queue_refresh(self) -> None:
-        args, should_reschedule = next_pending_refresh_action_model(
-            self._pending_queue_refresh_args,
-            should_defer=self._queue_refresh_should_defer(),
-        )
-        if should_reschedule:
-            self._pending_queue_refresh_timer.start(200)
-            return
-        if args is None:
-            return
-        self._pending_queue_refresh_args = None
-        self._refresh_queue_table(**args)
+        self.queue_refresh.flush_pending_queue_refresh()
 
     def _is_job_runnable(self, job: RenderJob | None) -> bool:
         return is_job_runnable(job, is_locked=self._is_job_path_sync_locked(job))
@@ -2922,8 +3258,11 @@ class MainWindow(QtWidgets.QMainWindow):
         select_job_ids: list[str] | None = None,
         select_row: int | None = None,
     ) -> None:
-        self._save_queue_state()
-        self._refresh_queue_table(select_row=select_row, select_job_id=select_job_id, select_job_ids=select_job_ids)
+        self.queue_refresh.save_and_refresh_queue(
+            select_job_id=select_job_id,
+            select_job_ids=select_job_ids,
+            select_row=select_row,
+        )
 
     def _mark_job_offline(self, job: RenderJob, reason: str | None = None) -> None:
         mark_job_offline_model(job, reason)
@@ -2932,10 +3271,10 @@ class MainWindow(QtWidgets.QMainWindow):
         restore_job_online_status_model(job)
 
     def _selection_ids_for_refresh(self, fallback_job_ids: list[str] | None = None) -> list[str] | None:
-        return selection_ids_for_refresh_model(self._selected_job_ids(), fallback_job_ids)
+        return self.queue_refresh.selection_ids_for_refresh(fallback_job_ids)
 
     def _defer_refresh_queue_tree_view(self) -> None:
-        QtCore.QTimer.singleShot(0, self._refresh_queue_tree_view)
+        self.tree_scan.defer_refresh_queue_tree_view()
 
     def _defer_save_and_refresh_queue(
         self,
@@ -2944,22 +3283,10 @@ class MainWindow(QtWidgets.QMainWindow):
         block_interaction: bool = False,
         status_text: str | None = None,
     ) -> None:
-        ids = list(select_job_ids or [])
-        if block_interaction:
-            self._begin_interaction_lock(status_text or "Applying change...")
-
-        def _finish(ids: list[str]) -> None:
-            try:
-                self._save_and_refresh_queue(
-                    select_job_ids=self._selection_ids_for_refresh(ids)
-                )
-            finally:
-                if block_interaction:
-                    self._end_interaction_lock()
-
-        QtCore.QTimer.singleShot(
-            0,
-            lambda ids=ids: _finish(ids),
+        self.queue_refresh.defer_save_and_refresh_queue(
+            select_job_ids,
+            block_interaction=block_interaction,
+            status_text=status_text,
         )
 
     def _tree_context_target_jobs(self, index: QtCore.QModelIndex) -> list[RenderJob]:
@@ -2975,60 +3302,84 @@ class MainWindow(QtWidgets.QMainWindow):
             kind=kind,
         )
 
-    def _show_queue_tree_context_menu(self, pos: QtCore.QPoint) -> None:
-        if not hasattr(self, "queue_tree") or self.queue_tree is None:
-            return
-        index = self.queue_tree.indexAt(pos)
+    def _tree_context_reload_target_jobs(self, index: QtCore.QModelIndex, target_jobs: list[RenderJob]) -> list[RenderJob]:
         if not index.isValid():
+            return list(target_jobs)
+        hip_path = str(index.data(TREE_HIP_ROLE) or "").strip()
+        if not hip_path:
+            return list(target_jobs)
+        file_jobs = [job for job in self.jobs if str(job.spec.hip_path or "").strip() == hip_path]
+        return file_jobs or list(target_jobs)
+
+    def _tree_cached_rop_record(self, hip_path: str, rop_path: str) -> dict[str, Any] | None:
+        hip_value = str(hip_path or "").strip()
+        rop_value = str(rop_path or "").strip()
+        if not hip_value or not rop_value:
+            return None
+        for record in self._tree_rop_records_by_hip.get(hip_value, []):
+            if str(record.get("path", "") or "").strip() == rop_value:
+                return dict(record)
+        return None
+
+    def _create_job_from_tree_rop(self, *, hip_path: str, rop_path: str) -> None:
+        payload = {
+            "hip_path": str(hip_path or "").strip(),
+            "rop_path": str(rop_path or "").strip(),
+            "name": "",
+            "frame_range_mode": "use_rop",
+            "start_frame": None,
+            "end_frame": None,
+            "step": None,
+        }
+        try:
+            job = self._build_job_from_payload(payload)
+        except ValueError as exc:
+            safe_message(self, "Create Job", str(exc))
             return
-        self.queue_tree.setCurrentIndex(index)
-        target_jobs = self._tree_context_target_jobs(index)
-        if not target_jobs:
+        except Exception as exc:
+            safe_message(self, "Create Job", f"Failed to create job: {exc}", traceback.format_exc())
             return
 
-        menu = QtWidgets.QMenu(self)
-        act_select = menu.addAction("Select")
-        act_remove = menu.addAction("Remove")
-        any_locked = any(self._is_job_path_sync_locked(job) for job in target_jobs)
-        act_remove.setEnabled((not any_locked) and any(not self._is_active_job(job) for job in target_jobs))
+        record = self._tree_cached_rop_record(payload["hip_path"], payload["rop_path"])
+        if record is not None:
+            strict_value = record.get("strict_frame_range")
+            if strict_value is not None:
+                job.spec.strict_frame_range = bool(strict_value)
+            allframes_value = record.get("all_frames_single_process")
+            if allframes_value is not None:
+                job.spec.render_all_frames_single_process = bool(allframes_value)
+            output_hint = str(record.get("output_path", "") or "").strip()
+            if output_hint:
+                job.view.out_file_sample_path = output_hint
+                job.view.out_path = self._normalize_output_display_path(output_hint)
+            rs = record.get("runtime_start_frame")
+            re_ = record.get("runtime_end_frame")
+            rstep = record.get("runtime_step")
+            if rs is not None and re_ is not None:
+                job.runtime.runtime_start_frame = rs
+                job.runtime.runtime_end_frame = re_
+                job.runtime.runtime_step = rstep
+                job.runtime.rop_default_start_frame = rs
+                job.runtime.rop_default_end_frame = re_
+                job.runtime.rop_default_step = rstep
 
-        chosen = menu.exec(self.queue_tree.viewport().mapToGlobal(pos))
-        if chosen is None:
-            return
-        if chosen == act_select:
-            self._refresh_queue_table(select_job_ids=[job.id for job in target_jobs])
-            return
-        if chosen == act_remove:
-            if any_locked:
-                safe_message(self, "Please Wait", "Wait for the current path update to finish.")
-                return
-            removable = [job for job in target_jobs if not self._is_active_job(job)]
-            if not removable:
-                safe_message(self, "Cannot Remove", "Cannot remove the active running job.")
-                return
-            removed_entries = [
-                {"index": idx, "job": self._job_to_persisted_dict(job)}
-                for idx, job in enumerate(self.jobs)
-                if job.id in {target.id for target in removable}
-            ]
-            removable_ids = {job.id for job in removable}
-            running_blocked = any(self._is_active_job(job) for job in target_jobs)
-            self.jobs = [job for job in self.jobs if job.id not in removable_ids]
-            self._push_history_command(
-                {
-                    "kind": "remove_jobs",
-                    "entries": removed_entries,
-                    "undo_select_job_ids": [entry["job"]["id"] for entry in removed_entries],
-                    "redo_select_job_ids": [],
-                }
-            )
-            self._save_and_refresh_queue()
-            if running_blocked:
-                safe_message(
-                    self,
-                    "Some Jobs Not Removed",
-                    "The active running job cannot be removed. Other matching jobs were removed.",
-                )
+        previous_selection = self._selected_job_ids()
+        insert_index = len(self.jobs)
+        self.jobs.append(job)
+        self._push_history_command(
+            {
+                "kind": "insert_jobs",
+                "entries": [{"index": insert_index, "job": self._job_to_persisted_dict(job)}],
+                "undo_select_job_ids": previous_selection,
+                "redo_select_job_ids": [job.id],
+            }
+        )
+        self._save_queue_state()
+        self._refresh_queue_table(select_job_id=job.id)
+        self._set_status_message(f"Added job: {job.display_name()}", 3000)
+
+    def _show_queue_tree_context_menu(self, pos: QtCore.QPoint) -> None:
+        self.queue_tree_context_menu.show_queue_tree_context_menu(pos)
 
     def _propagate_hip_path_change(self, old_hip: str, new_hip: str) -> list[str]:
         return propagate_hip_path_change_model(
@@ -3084,6 +3435,7 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         reset_override_to_rop: bool = False,
     ) -> list[str]:
+        self._refresh_tree_rop_cache_for_hips([job.spec.hip_path for job in target_jobs])
         return refresh_jobs_from_rop_metadata_model(
             target_jobs,
             running_status=JobStatus.RUNNING,
@@ -3303,149 +3655,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return changed
 
     def _show_queue_context_menu(self, pos: QtCore.QPoint) -> None:
-        idx = self.queue_table.indexAt(pos)
-        if idx.isValid():
-            sm = self.queue_table.selectionModel()
-            if sm is not None and not sm.isRowSelected(idx.row(), QtCore.QModelIndex()):
-                self.queue_table.selectRow(idx.row())
-        job = self._selected_job()
-        if job is None:
-            return
-        selected_jobs = self._selected_jobs()
-        target_jobs = selected_jobs or [job]
-        any_active = any(j.status == JobStatus.RUNNING and self.current_job_id == j.id for j in target_jobs)
-
-        menu = QtWidgets.QMenu(self)
-        out_folder = self._output_folder_from_value(job.view.out_path)
-        has_finished_jobs = any(j.runtime.status in {JobStatus.DONE, JobStatus.FAILED} for j in self.jobs)
-        any_locked = any(self._is_job_path_sync_locked(j) for j in target_jobs)
-        reload_decision = can_reload_jobs_from_file(
-            target_jobs=target_jobs,
-            is_active_job_fn=self._is_active_job,
-            hbatch_exists=self._hbatch_exists(),
-            is_locked_job_fn=self._is_job_path_sync_locked,
-        )
-        duplicate_decision = can_duplicate_jobs(
-            target_jobs,
-            is_active_job_fn=self._is_active_job,
-            scan_in_progress=self._scan_in_progress(),
-            is_locked_job_fn=self._is_job_path_sync_locked,
-        )
-        preview_path = self._job_preview_path(job)
-        preview_player_path = self._current_player_path()
-        preview_decision = can_preview_job(
-            preview_path_exists=bool(preview_path),
-            player_path_set=bool(preview_player_path),
-            player_exists=bool(preview_player_path and Path(preview_player_path).exists()),
-        )
-        open_folder_decision = can_open_output_folder(folder_exists=bool(out_folder and out_folder.exists()))
-        reset_value_allowed = bool(
-            idx.isValid() and idx.column() in {3, 4} and any(self._job_can_reset_cached_cell(t, idx.column()) for t in target_jobs)
-        )
-        availability = build_queue_context_menu_availability_model(
-            job_enabled=bool(job.spec.enabled),
-            any_active=bool(any_active),
-            any_locked=bool(any_locked),
-            has_finished_jobs=bool(has_finished_jobs),
-            reset_value_allowed=bool(reset_value_allowed),
-            reload_allowed=bool(reload_decision.allowed),
-            duplicate_allowed=bool(duplicate_decision.allowed),
-            preview_allowed=bool(preview_decision.allowed),
-            open_folder_allowed=bool(open_folder_decision.allowed),
-        )
-        act_toggle = menu.addAction(availability.toggle_text)
-        act_toggle.setEnabled(availability.toggle_enabled)
-        act_reset = menu.addAction("Reset State")
-        act_reset.setEnabled(availability.reset_enabled)
-        act_reset_cell_cached = None
-        if idx.isValid() and idx.column() in {3, 4}:
-            menu.addSeparator()
-            act_reset_cell_cached = menu.addAction("Reset Value")
-            act_reset_cell_cached.setEnabled(availability.reset_value_enabled)
-        act_reload_from_rop = menu.addAction("Reload Values from File")
-        act_reload_from_rop.setEnabled(availability.reload_enabled)
-        menu.addSeparator()
-        act_duplicate = menu.addAction("Duplicate")
-        act_duplicate.setEnabled(availability.duplicate_enabled)
-        act_remove = menu.addAction("Remove")
-        act_remove.setEnabled(availability.remove_enabled)
-        act_clear_finished = menu.addAction("Clear Finished")
-        act_clear_finished.setEnabled(availability.clear_finished_enabled)
-        menu.addSeparator()
-        act_preview = menu.addAction("Preview")
-        act_preview.setEnabled(availability.preview_enabled)
-        act_open_folder = menu.addAction("Open Folder")
-        act_open_folder.setEnabled(availability.open_folder_enabled)
-
-        chosen = menu.exec(self.queue_table.viewport().mapToGlobal(pos))
-        if chosen is None:
-            return
-        action_key = queue_context_action_key_model(
-            chosen,
-            {
-                "preview": act_preview,
-                "open_folder": act_open_folder,
-                "toggle": act_toggle,
-                "reset": act_reset,
-                "reset_value": act_reset_cell_cached,
-                "reload_from_rop": act_reload_from_rop,
-                "duplicate": act_duplicate,
-                "remove": act_remove,
-                "clear_finished": act_clear_finished,
-            },
-        )
-        if action_key == "preview":
-            self._preview_job(job)
-        elif action_key == "open_folder" and out_folder is not None:
-            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(out_folder)))
-        elif action_key == "toggle":
-            new_enabled = not job.spec.enabled
-            apply_job_mutation_with_history_model(
-                target_jobs,
-                is_active_job=self._is_active_job,
-                mutate_job=lambda target: setattr(target, "enabled", new_enabled),
-                job_states_for_ids=self._job_states_for_ids,
-                push_history_command=self._push_history_command,
-                save_and_refresh_queue=lambda ids: self._save_and_refresh_queue(select_job_ids=ids),
-            )
-        elif action_key == "reset":
-            apply_job_mutation_with_history_model(
-                target_jobs,
-                is_active_job=self._is_active_job,
-                mutate_job=self._reset_job_state,
-                job_states_for_ids=self._job_states_for_ids,
-                push_history_command=self._push_history_command,
-                save_and_refresh_queue=lambda ids: self._save_and_refresh_queue(select_job_ids=ids),
-            )
-        elif action_key == "reset_value":
-            target_ids = [j.id for j in target_jobs]
-            before_states = self._job_states_for_ids(target_ids)
-            if idx.isValid() and idx.column() in {3, 4} and self._reset_cached_cell_for_jobs(idx.column(), target_jobs):
-                after_states = self._job_states_for_ids(target_ids)
-                self._push_history_command(
-                    {
-                        "kind": "update_jobs",
-                        "before": before_states,
-                        "after": after_states,
-                        "undo_select_job_ids": target_ids,
-                        "redo_select_job_ids": target_ids,
-                    }
-                )
-                self._save_and_refresh_queue(select_job_ids=[j.id for j in target_jobs])
-        elif action_key == "reload_from_rop":
-            if not reload_decision.allowed:
-                safe_message(self, "Reload From File", reload_decision.reason)
-                return
-            defer_reload_values_from_file_model(
-                target_jobs,
-                defer_reload_jobs_from_file=self._defer_reload_jobs_from_file,
-            )
-        elif action_key == "duplicate":
-            self._duplicate_selected_jobs()
-        elif action_key == "remove":
-            self._remove_selected_job()
-        elif action_key == "clear_finished":
-            self._clear_finished_jobs()
+        self.queue_context_menu.show_queue_context_menu(pos)
 
     def _resolve_job_range_for_execution(
         self, job: RenderJob, *, mutate_job: bool = True
@@ -3718,6 +3928,9 @@ class MainWindow(QtWidgets.QMainWindow):
         return job_to_persisted_dict_model(job)
 
     def _queue_view_to_persisted_dict(self) -> dict[str, Any]:
+        return self.queue_state.queue_view_to_persisted_dict()
+
+    def queue_view_state_payload(self) -> dict[str, Any]:
         return queue_view_to_persisted_dict_model(self.queue_table)
 
     def _job_from_persisted_dict(self, data: dict[str, Any], *, active_job_id: str | None = None) -> RenderJob | None:
@@ -3795,20 +4008,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_status_message("Redo", 1500)
 
     def _save_queue_state(self, path: Path | None = None) -> bool:
-        try:
-            target_path = save_queue_state_model(
-                current_queue_path=self._current_queue_file_path(),
-                path_override=path,
-                jobs=self.jobs,
-                queue_view=self._queue_view_to_persisted_dict(),
-                active_job_id=self.current_job_id,
-                save_queue_payload_fn=save_queue_payload,
-            )
-            self._set_current_queue_file_path(target_path)
-            return True
-        except (OSError, TypeError, ValueError) as exc:
-            self._append_log("Stderr", f"[Queue] Failed to save queue: {exc}\n")
-            return False
+        return self.queue_state.save_queue_state(path)
 
     def _write_queue_snapshot(self, reason: str, *, max_files: int = 5) -> bool:
         try:
@@ -3830,10 +4030,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return build_queue_run_summary_model(self.jobs, started_job_ids)
 
     def _load_persisted_queue(self) -> None:
-        path = self._current_queue_file_path()
-        if not path.exists():
-            return
-        self._load_queue_from_path(path)
+        self.queue_state.load_persisted_queue()
 
     def _selected_job(self) -> RenderJob | None:
         return selected_job_for_row_model(self.jobs, self._selected_row())
@@ -4075,114 +4272,45 @@ class MainWindow(QtWidgets.QMainWindow):
         select_job_id: str | None = None,
         select_job_ids: list[str] | None = None,
     ) -> None:
-        if self._queue_refresh_should_defer():
-            self._pending_queue_refresh_args = pending_refresh_args_model(
-                select_row=select_row,
-                select_job_id=select_job_id,
-                select_job_ids=select_job_ids,
-            )
-            self._pending_queue_refresh_timer.start(200)
-            return
-        current_selected = self._selected_job()
-        preserved_job_ids, preserved_job_id = preserved_selection_model(
+        self.queue_refresh.refresh_queue_table(
             select_row=select_row,
             select_job_id=select_job_id,
             select_job_ids=select_job_ids,
-            current_selected_job_ids=[j.id for j in self._selected_jobs()],
-            current_selected_job_id=(current_selected.id if current_selected is not None else None),
         )
 
-        selection_model = self.queue_table.selectionModel()
-        selection_blocker = QtCore.QSignalBlocker(selection_model) if selection_model is not None else None
-        try:
-            self.queue_table.setUpdatesEnabled(False)
-            self.queue_table_model.refresh_all()
-            self.queue_table.clearSelection()
-
-            target_job_id, target_job_ids, target_job_id_set = target_selection_model(
-                select_job_id=select_job_id,
-                select_job_ids=select_job_ids,
-                preserved_job_id=preserved_job_id,
-                preserved_job_ids=preserved_job_ids,
-            )
-            selected_applied = False
-            if target_job_ids:
-                sm = self.queue_table.selectionModel()
-                if sm is not None:
-                    for row, job in enumerate(self.jobs):
-                        if job.id in target_job_id_set:
-                            model_idx = self._queue_view_index_from_source_row(row, 0)
-                            if not model_idx.isValid():
-                                continue
-                            sm.select(
-                                model_idx,
-                                QtCore.QItemSelectionModel.SelectionFlag.Select
-                                | QtCore.QItemSelectionModel.SelectionFlag.Rows,
-                            )
-                            selected_applied = True
-            elif target_job_id:
-                for row, job in enumerate(self.jobs):
-                    if job.id == target_job_id:
-                        model_idx = self._queue_view_index_from_source_row(row, 0)
-                        if model_idx.isValid():
-                            self.queue_table.selectRow(model_idx.row())
-                            selected_applied = True
-                        break
-            elif select_row is not None and self.jobs:
-                clamped_row = clamped_select_row_model(select_row, job_count=len(self.jobs))
-                if clamped_row is None:
-                    clamped_row = 0
-                model_idx = self._queue_view_index_from_source_row(clamped_row, 0)
-                if model_idx.isValid():
-                    self.queue_table.selectRow(model_idx.row())
-                    selected_applied = True
-
-            if selected_applied:
-                sm = self.queue_table.selectionModel()
-                row = self._selected_row()
-                if sm is not None and row >= 0:
-                    idx = self._queue_view_index_from_source_row(row, 0)
-                    sm.setCurrentIndex(idx, QtCore.QItemSelectionModel.SelectionFlag.NoUpdate)
-        finally:
-            self.queue_table.setUpdatesEnabled(True)
-            if selection_blocker is not None:
-                del selection_blocker
-
-        self.queue_table.viewport().update()
-        self._refresh_queue_tree_view()
-        self._update_job_properties_panel()
-        self._refresh_ui_state()
-
     def _refresh_job_row(self, job_id: str) -> None:
-        target_id = str(job_id or "").strip()
-        if not target_id:
-            return
-        row = job_row_by_id_model(self.jobs, target_id)
-        if row < 0:
-            return
-        if self._queue_refresh_should_defer():
-            self._pending_queue_refresh_args = pending_refresh_args_model(select_job_id=target_id)
-            self._pending_queue_refresh_timer.start(200)
-            return
-        self.queue_table_model.refresh_job_by_id(target_id)
-        self.queue_table.viewport().update()
-        selected_ids = set(self._selected_job_ids())
-        if target_id in selected_ids:
-            self._update_job_properties_panel()
-        self._refresh_ui_state()
+        self.queue_refresh.refresh_job_row(job_id)
+
+    def _flush_pending_job_row_refreshes(self) -> None:
+        self.queue_refresh.flush_pending_job_row_refreshes()
+
+    def _sync_last_job_status_snapshot(self) -> None:
+        self.queue_refresh.sync_last_job_status_snapshot()
 
     def _refresh_queue_tree_view(self) -> None:
-        if not hasattr(self, "queue_tree") or self.queue_tree is None:
-            return
-        tree = self.queue_tree
-        model = getattr(self, "queue_tree_model", None)
-        if model is None:
-            return
-        try:
-            self._suppress_tree_item_changed = True
-            refresh_queue_tree_model(tree, model, self.jobs, is_locked_job_fn=self._is_job_path_sync_locked)
-        finally:
-            self._suppress_tree_item_changed = False
+        self.tree_scan.refresh_queue_tree_view()
+
+    @staticmethod
+    def _sanitize_tree_rop_records(records: Any) -> list[dict[str, Any]]:
+        return TreeScanCoordinator.sanitize_tree_rop_records(records)
+
+    def _persist_tree_rop_cache(self) -> None:
+        self.tree_scan.persist_tree_rop_cache()
+
+    def _replace_tree_rop_cache_for_hip(self, hip_path: str, records: list[dict[str, Any]]) -> None:
+        self.tree_scan.replace_tree_rop_cache_for_hip(hip_path, records)
+
+    def _selected_scan_records_for_tree(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return self.tree_scan.selected_scan_records_for_tree(records)
+
+    def _refresh_tree_rop_cache_for_hips(self, hip_paths: list[str]) -> None:
+        self.tree_scan.refresh_tree_rop_cache_for_hips(hip_paths)
+
+    def _tree_rop_paths_for_hip(self, hip_path: str) -> list[str]:
+        return self.tree_scan.tree_rop_paths_for_hip(hip_path)
+
+    def _on_tree_show_used_only_toggled(self, checked: bool) -> None:
+        self.tree_scan.on_tree_show_used_only_toggled(checked)
 
     def _theme_icon_path(self, key: str) -> str:
         return str(getattr(self, "_theme_icons", {}).get(key, "") or "")
@@ -4245,7 +4373,7 @@ class MainWindow(QtWidgets.QMainWindow):
             item = QtWidgets.QListWidgetItem(text)
             item.setIcon(self._notification_icon_for_severity(sev))
             item.setForeground(QtGui.QBrush(self._notification_color_for_severity(sev)))
-            list_widget.addItem(item)
+            list_widget.insertItem(0, item)
         self._last_notification_signature = next_signature
         self._trim_notifications_list(max_items=250)
         return True
@@ -4256,9 +4384,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         remove_count = trim_notification_count_model(count=list_widget.count(), max_items=max_items)
         for _ in range(remove_count):
-            list_widget.takeItem(0)
+            list_widget.takeItem(list_widget.count() - 1)
         if list_widget.count() > 0:
-            list_widget.scrollToBottom()
+            list_widget.scrollToTop()
 
     def _append_notifications(self, source: str, text: str) -> None:
         entries, next_signature = appendable_notifications_for_log_model(
@@ -4280,9 +4408,34 @@ class MainWindow(QtWidgets.QMainWindow):
     def _classified_render_error_notification(low: str) -> tuple[str, str] | None:
         return classified_render_error_notification_model(low)
 
+    @staticmethod
+    def _load_tinted_svg_icon(path: Path, color: QtGui.QColor, *, size: int = 20) -> QtGui.QIcon:
+        renderer = QtSvg.QSvgRenderer(str(path))
+        if not renderer.isValid():
+            return QtGui.QIcon()
+        pixmap = QtGui.QPixmap(size, size)
+        pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+        painter = QtGui.QPainter(pixmap)
+        try:
+            renderer.render(painter)
+            painter.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceIn)
+            painter.fillRect(pixmap.rect(), color)
+        finally:
+            painter.end()
+        return QtGui.QIcon(pixmap)
+
     def _notification_icon_for_severity(self, severity: str) -> QtGui.QIcon:
-        style = self.style()
         sev = str(severity or "info").lower()
+        cached_icon = self._notification_icon_cache.get(sev)
+        if cached_icon is not None and not cached_icon.isNull():
+            return cached_icon
+        icon_path = TABLER_NOTIFICATION_ICON_PATHS.get(sev)
+        if icon_path is not None and icon_path.exists():
+            icon = self._load_tinted_svg_icon(icon_path, self._notification_color_for_severity(sev))
+            if not icon.isNull():
+                self._notification_icon_cache[sev] = icon
+                return icon
+        style = self.style()
         if sev == "error":
             return style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxCritical)
         if sev == "warning":
@@ -4348,7 +4501,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_status_message("Diagnostics copied.", 4000)
 
     def _on_queue_selection_changed(self) -> None:
-        self.queue_table.viewport().update()
+        self._flush_pending_job_row_refreshes()
         self._update_job_properties_panel()
         self._refresh_ui_state()
 
@@ -4360,70 +4513,34 @@ class MainWindow(QtWidgets.QMainWindow):
         return queue_progress_split_values_model(job)
 
     def _queue_header_visual_order(self) -> list[int]:
-        header = self.queue_table.horizontalHeader()
-        return queue_header_visual_order_model(
-            column_count=self.queue_table.columnCount(),
-            logical_index_for_visual=header.logicalIndex,
-        )
+        return self.queue_view_state.header_visual_order()
 
     def _queue_hidden_columns_from_data(self, raw: Any) -> set[int]:
-        return queue_hidden_columns_from_data_model(raw, column_count=self.queue_table.columnCount())
+        return self.queue_view_state.hidden_columns_from_data(raw)
+
+    def _queue_default_column_width(self, logical: int, fallback: int) -> int:
+        return self.queue_view_state.default_column_width(logical, fallback)
+
+    def _sanitized_queue_column_width(self, logical: int, width: int) -> int:
+        return self.queue_view_state.sanitized_column_width(logical, width)
 
     def _queue_column_widths_from_data(self, raw: Any) -> dict[int, int]:
-        return queue_column_widths_from_data_model(raw, column_count=self.queue_table.columnCount())
+        return self.queue_view_state.column_widths_from_data(raw)
 
     def _reset_queue_view_to_defaults(self) -> None:
-        default_widths = getattr(self, "_queue_default_column_widths", {})
-        for logical in range(self.queue_table.columnCount()):
-            width = int(default_widths.get(logical, self.queue_table.columnWidth(logical)))
-            self.queue_table.setColumnWidth(logical, width)
-            self.queue_table.setColumnHidden(logical, False)
+        self.queue_view_state.reset_to_defaults()
 
     def _apply_queue_view_from_persisted_data(self, raw: Any) -> None:
-        if not isinstance(raw, dict):
-            return
-        widths = self._queue_column_widths_from_data(raw.get("column_widths", {}))
-        for logical, width in widths.items():
-            self.queue_table.setColumnWidth(logical, width)
-
-        hidden = self._queue_hidden_columns_from_data(raw.get("hidden_columns", []))
-        visible_count = self.queue_table.columnCount() - len(hidden)
-        if visible_count <= 0:
-            hidden.clear()
-        for c in range(self.queue_table.columnCount()):
-            self.queue_table.setColumnHidden(c, c in hidden)
+        self.queue_view_state.apply_persisted_data(raw)
 
     def _is_valid_queue_header_grouping(self) -> bool:
-        header = self.queue_table.horizontalHeader()
-        return is_valid_queue_header_grouping_model(
-            column_count=self.queue_table.columnCount(),
-            left_group={0, 1, 2, 3, 4, 5, 6},
-            boundary_visual_index=6,
-            is_hidden=self.queue_table.isColumnHidden,
-            visual_index_for_logical=header.visualIndex,
-        )
+        return self.queue_view_state.is_valid_header_grouping()
 
     def _restore_queue_header_order(self, visual_order: list[int]) -> None:
-        header = self.queue_table.horizontalHeader()
-        self._queue_header_group_restore_guard = True
-        try:
-            for target_visual, logical in enumerate(visual_order):
-                current_visual = header.visualIndex(logical)
-                if current_visual != target_visual:
-                    header.moveSection(current_visual, target_visual)
-        finally:
-            self._queue_header_group_restore_guard = False
-            self.queue_table.viewport().update()
+        self.queue_view_state.restore_header_order(visual_order)
 
     def _on_queue_header_section_moved(self, _logical: int, _old_visual: int, _new_visual: int) -> None:
-        if self._queue_header_group_restore_guard:
-            return
-        if self._is_valid_queue_header_grouping():
-            self._queue_header_valid_order = self._queue_header_visual_order()
-            self.queue_table.viewport().update()
-            return
-        if self._queue_header_valid_order:
-            self._restore_queue_header_order(self._queue_header_valid_order)
+        self.queue_view_state.on_header_section_moved()
 
     def _on_queue_header_section_resized(self, _logical: int, _old_size: int, _new_size: int) -> None:
         self._save_queue_state()
@@ -4523,40 +4640,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_ui_state()
 
     def _handle_scan_worker_message(self, message: dict[str, Any]) -> None:
-        request_id = str(message.get("request_id", "") or "")
-        if request_id and self._active_scan_request_id and request_id != self._active_scan_request_id:
-            return
-        payload = dict(message.get("payload", {}) or {})
-        message_type = str(message.get("type", "") or "")
-        if message_type == "scan.result":
-            self._active_scan_request_id = ""
-            self._create_job_scan_in_progress = False
-            records = list(payload.get("records", []) or [])
-            renderable_records = [r for r in records if self._is_likely_renderable_scan_node(r)]
-            selected_records = renderable_records or records
-            if selected_records:
-                self.add_job_panel.set_scanned_rops(selected_records)
-                if renderable_records:
-                    self._set_status_message(
-                        f"Scan complete ({len(renderable_records)} likely render nodes, {len(records)} total)",
-                        5000,
-                    )
-                else:
-                    self._append_log("Stdout", "[Scan] No likely render/output nodes matched; showing all scanned nodes.\n")
-                    self._set_status_message(f"Scan complete ({len(records)} nodes found, unfiltered)", 5000)
-            else:
-                safe_message(self, "Scan", "No nodes found in selected scan targets.")
-                self._set_status_message("No nodes found in selected scan targets.", 5000)
-            self._refresh_ui_state()
-            return
-        if message_type == "scan.failed":
-            self._active_scan_request_id = ""
-            self._create_job_scan_in_progress = False
-            message_text = str(payload.get("message", "") or "Scan failed.")
-            details = str(payload.get("stderr", "") or self.scan_worker_client.last_stderr_text or "")
-            safe_message(self, "Scan", message_text, details or None)
-            self._set_status_message(message_text, 5000)
-            self._refresh_ui_state()
+        self.tree_scan.handle_scan_worker_message(message)
 
     @staticmethod
     def _is_likely_renderable_scan_node(record: dict[str, str]) -> bool:
@@ -5069,14 +5153,31 @@ class MainWindow(QtWidgets.QMainWindow):
             self.config.set("left_splitter_top_height", int(self._left_splitter_top_height_pref))
         if self._left_notifications_height_pref is not None:
             self.config.set("left_notifications_height", int(self._left_notifications_height_pref))
+        if isinstance(self._left_stack_splitter_sizes_pref, list) and len(self._left_stack_splitter_sizes_pref) == 4:
+            self.config.set("left_stack_splitter_sizes", [int(max(0, s)) for s in self._left_stack_splitter_sizes_pref])
+        if self._left_pane_min_width_floor is not None:
+            self.config.set("left_pane_min_width", int(self._left_pane_min_width_floor))
         self.config.set("hbatch_path", self._current_hbatch_path())
         super().closeEvent(event)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
-        self._apply_main_splitter_left_width_pref()
-        self._apply_left_splitter_default_sizes()
-        self._apply_left_column_splitter_default_sizes()
+        self._apply_left_stack_splitter_default_sizes()
+        self._schedule_deferred(self._schedule_panel_width_reconcile, UI_DEFERRED_SETTLE_MS)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        if self._startup_layout_pending:
+            if not self._startup_layout_finalize_scheduled:
+                self._startup_layout_finalize_scheduled = True
+                self._schedule_deferred(self._finalize_startup_layout, UI_DEFERRED_NOW_MS)
+            return
+        self._schedule_now_and_settled(self._schedule_panel_width_reconcile)
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:
+        super().changeEvent(event)
+        if event.type() == QtCore.QEvent.Type.WindowStateChange:
+            self._schedule_now_and_settled(self._schedule_panel_width_reconcile)
 
 
 def install_excepthook() -> None:
@@ -5110,4 +5211,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

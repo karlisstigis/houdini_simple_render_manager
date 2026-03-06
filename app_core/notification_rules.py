@@ -66,19 +66,22 @@ def notification_summary_for_line(source: str, line: str) -> tuple[str, str] | N
         if inner_low == "queue complete":
             return ("Queue complete.", "info")
         if inner_low == "queue stopped":
-            return ("Queue stopped.", "warning")
+            return None
         if inner_low == "queue aborted":
             return ("Queue aborted.", "error")
         if inner_low.startswith("render start:"):
             job_name = inner.split(":", 1)[1].strip() if ":" in inner else inner
             return (f"Started render: {job_name}", "info")
+        if inner_low.startswith("render end:"):
+            if "| canceled |" in inner_low or "| cancelled |" in inner_low:
+                return ("Render Canceled", "info")
         return None
     if line.startswith("[Queue] Stop requested"):
-        return ("Stopping queue after the current step.", "warning")
+        return None
     if line.startswith("[Queue] Terminating current render process"):
-        return ("Stopping the active render.", "warning")
+        return None
     if line.startswith("[Queue] Force killing current render process"):
-        return ("Force-stopped the active render.", "error")
+        return None
     if line.startswith("[Queue] Resumed"):
         return ("Queue resumed.", "info")
     if line.startswith("[Queue] Pause requested"):
@@ -131,4 +134,3 @@ def notification_messages_for_log(source: str, text: str) -> list[tuple[str, str
         if summary is not None:
             messages.append(summary)
     return messages
-

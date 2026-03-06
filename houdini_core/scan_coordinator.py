@@ -125,17 +125,7 @@ class ScanCoordinator:
         return None if value is None else bool(value)
 
     def scan_rop_info_for_hip(self, hip_path: str) -> dict[str, RopInfo]:
-        if not self._hooks.hbatch_exists():
-            return {}
-        response = self.request_sync_payload(
-            "scan.nodes",
-            hip_path=hip_path,
-            timeout_ms=30000,
-            extra={"roots": ["/out", "/stage"]},
-        )
-        if response is None or str(response.get("type", "") or "") != "scan.result":
-            return {}
-        records = list(dict(response.get("payload", {}) or {}).get("records", []) or [])
+        records = self.scan_rop_records_for_hip(hip_path)
         info_map: dict[str, RopInfo] = {}
         for record in records:
             if not isinstance(record, dict):
@@ -144,6 +134,20 @@ class ScanCoordinator:
             if path:
                 info_map[path] = rop_info_from_scan_record_model(record)
         return info_map
+
+    def scan_rop_records_for_hip(self, hip_path: str) -> list[dict[str, Any]]:
+        if not self._hooks.hbatch_exists():
+            return []
+        response = self.request_sync_payload(
+            "scan.nodes",
+            hip_path=hip_path,
+            timeout_ms=30000,
+            extra={"roots": ["/out", "/stage"]},
+        )
+        if response is None or str(response.get("type", "") or "") != "scan.result":
+            return []
+        records = list(dict(response.get("payload", {}) or {}).get("records", []) or [])
+        return [record for record in records if isinstance(record, dict)]
 
     def handle_scan_requested(self, request: dict) -> bool:
         hip_path = str(request.get("hip_path", "")).strip()

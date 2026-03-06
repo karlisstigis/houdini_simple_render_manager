@@ -19,6 +19,31 @@ EDITABLE_ROLE = QtCore.Qt.ItemDataRole.UserRole + 34
 PATH_SYNC_LOCKED_ROLE = QtCore.Qt.ItemDataRole.UserRole + 35
 
 
+def _int_mismatch(
+    value,
+    cached,
+    *,
+    other_value=None,
+    other_cached=None,
+    zero_is_missing: bool = False,
+) -> bool:
+    if value is None or cached is None:
+        return True
+    if zero_is_missing and cached in (None, 0):
+        return True
+    try:
+        if int(value) != int(float(cached)):
+            return True
+        if other_value is not None or other_cached is not None:
+            if other_value is None or other_cached is None:
+                return True
+            if int(other_value) != int(float(other_cached)):
+                return True
+        return False
+    except Exception:
+        return True
+
+
 @dataclass(frozen=True)
 class QueueTableModelHooks:
     jobs_provider: Callable[[], list[RenderJob]]
@@ -155,32 +180,16 @@ class QueueTableModel(QtCore.QAbstractTableModel):
         cached_start = job.runtime.rop_default_start_frame
         cached_end = job.runtime.rop_default_end_frame
         cached_step = job.runtime.rop_default_step
-        range_is_overridden = False
-        step_is_overridden = False
-        if job.spec.frame_range_mode == "override":
-            if (
-                cached_start is None
-                or cached_end is None
-                or job.spec.start_frame is None
-                or job.spec.end_frame is None
-            ):
-                range_is_overridden = True
-            else:
-                try:
-                    range_is_overridden = not (
-                        int(job.spec.start_frame) == int(cached_start)
-                        and int(job.spec.end_frame) == int(cached_end)
-                    )
-                except Exception:
-                    range_is_overridden = True
+        if job.spec.frame_range_mode != "override":
+            return False, False
 
-            if cached_step in (None, 0) or job.spec.step is None:
-                step_is_overridden = True
-            else:
-                try:
-                    step_is_overridden = int(job.spec.step) != int(float(cached_step))
-                except Exception:
-                    step_is_overridden = True
+        range_is_overridden = _int_mismatch(
+            job.spec.start_frame,
+            cached_start,
+            other_value=job.spec.end_frame,
+            other_cached=cached_end,
+        )
+        step_is_overridden = _int_mismatch(job.spec.step, cached_step, zero_is_missing=True)
         return range_is_overridden, step_is_overridden
 
     def _tooltip_for(self, job: RenderJob, column: int) -> str:
@@ -307,6 +316,15 @@ class QueueTableModel(QtCore.QAbstractTableModel):
     def refresh_all(self) -> None:
         self.beginResetModel()
         self.endResetModel()
+
+    def refresh_all_rows_data(self) -> None:
+        row_count = self.rowCount()
+        column_count = self.columnCount()
+        if row_count <= 0 or column_count <= 0:
+            return
+        top_left = self.index(0, 0)
+        bottom_right = self.index(row_count - 1, column_count - 1)
+        self.dataChanged.emit(top_left, bottom_right)
 
     def refresh_job_by_id(self, job_id: str) -> None:
         self.refresh_jobs_by_id([job_id])

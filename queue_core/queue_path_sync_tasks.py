@@ -38,7 +38,6 @@ def run_next_path_sync_task(
     processed_ids: set[str] = set()
     refresh_needed = False
     try:
-        refresh_queue_tree_view()
         ids_set = set(ids)
         target_jobs = [job for job in jobs if job.id in ids_set]
         by_hip: dict[str, list[RenderJob]] = {}
@@ -66,6 +65,7 @@ def run_next_path_sync_task(
             if offline_count:
                 message += f", {offline_count} offline"
             append_notification_message(message + ".", "warning" if offline_count else "info")
+        refresh_queue_tree_view()
         refresh_needed = True
     finally:
         remaining_ids = [job_id for job_id in ids if job_id not in processed_ids]

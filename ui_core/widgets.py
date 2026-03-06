@@ -8,7 +8,18 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from queue_core.queue_models import DeviceOverrideMode, UsdOutputDirectoryMode
 from queue_core.queue_table_model import PATH_SYNC_LOCKED_ROLE, QueueTableModel
-from ui_core.theme_support import DEFAULT_THEME
+from ui_core.theme_support import DEFAULT_THEME, styled_scrollbar_extent
+
+TABLER_NOTIFICATION_NOTICE_HTML = (
+    "<b>Notification Icons</b><br>"
+    "This app bundles notification icons from "
+    '<a href="https://new.tabler.io/icons">Tabler Icons</a> by Pawel Kuna. '
+    "They are provided under the MIT License.<br><br>"
+    'Source pages: <a href="https://tabler.io/icons/icon/alert-triangle">alert-triangle</a>, '
+    '<a href="https://tabler.io/icons/icon/alert-octagon">alert-octagon</a>, '
+    '<a href="https://tabler.io/icons/icon/info-circle">info-circle</a>.<br>'
+    "Bundled license file: <code>assets/third_party/tabler/LICENSE.txt</code>"
+)
 
 
 class CleanStepSpinBox(QtWidgets.QSpinBox):
@@ -101,37 +112,191 @@ class SafeCommitLineEdit(QtWidgets.QLineEdit):
 
 class PanelFrame(QtWidgets.QFrame):
     """Header-strip panel wrapper used for top-level app sections."""
+    expanded_changed = QtCore.Signal(bool)
 
-    def __init__(self, title: str, content: QtWidgets.QWidget, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self,
+        title: str,
+        content: QtWidgets.QWidget,
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        collapsible: bool = False,
+        expanded: bool = True,
+        scrollable_body: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("panelFrame")
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred)
+        self._collapsible = bool(collapsible)
+        self._expanded = bool(expanded)
+        self._expanded_max_height_cap: int | None = None
+        self._expanded_min_height = int(self.minimumHeight())
+        self._expanded_max_height = int(self.maximumHeight())
+        self._expanded_size_policy = QtWidgets.QSizePolicy(self.sizePolicy())
+        self._keep_expanding_when_collapsed = False
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        header = QtWidgets.QWidget(self)
-        header.setObjectName("panelFrameHeader")
-        header_layout = QtWidgets.QHBoxLayout(header)
+        self._header = QtWidgets.QWidget(self)
+        self._header.setObjectName("panelFrameHeader")
+        self._header.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        header_layout = QtWidgets.QHBoxLayout(self._header)
         header_layout.setContentsMargins(12, 6, 12, 6)
-        header_layout.setSpacing(0)
-        title_label = QtWidgets.QLabel(title, header)
-        title_label.setObjectName("panelFrameTitle")
-        header_layout.addWidget(title_label)
+        header_layout.setSpacing(6)
+        self._title_label: QtWidgets.QLabel | None = None
+        self._toggle_button: QtWidgets.QToolButton | None = None
+        if self._collapsible:
+            self._toggle_button = QtWidgets.QToolButton(self._header)
+            self._toggle_button.setObjectName("panelFrameToggle")
+            self._toggle_button.setFixedSize(14, 14)
+            self._toggle_button.setCheckable(True)
+            self._toggle_button.clicked.connect(self._on_toggled)
+            header_layout.addWidget(self._toggle_button, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        else:
+            header_layout.addSpacing(2)
+
+        self._title_label = QtWidgets.QLabel(title, self._header)
+        self._title_label.setObjectName("panelFrameTitle")
+        header_layout.addWidget(self._title_label)
         header_layout.addStretch(1)
 
-        body = QtWidgets.QWidget(self)
-        body.setObjectName("panelFrameBody")
-        body_layout = QtWidgets.QVBoxLayout(body)
-        body_layout.setContentsMargins(8, 8, 8, 8)
+        if self._collapsible:
+            self._title_label.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            self._header.mousePressEvent = self._on_header_mouse_press
+            self._title_label.mousePressEvent = self._on_header_mouse_press
+
+        self._body = QtWidgets.QWidget(self)
+        self._body.setObjectName("panelFrameBody")
+        body_layout = QtWidgets.QVBoxLayout(self._body)
+        right_gutter = styled_scrollbar_extent(DEFAULT_THEME) if bool(scrollable_body) else 8
+        body_layout.setContentsMargins(8, 8, right_gutter, 8)
         body_layout.setSpacing(0)
-        body_layout.addWidget(content)
+        if bool(scrollable_body):
+            self._body_scroll = QtWidgets.QScrollArea(self._body)
+            self._body_scroll.setObjectName("panelFrameBodyScroll")
+            self._body_scroll.setWidgetResizable(True)
+            self._body_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            self._body_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self._body_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self._body_scroll.setWidget(content)
+            body_layout.addWidget(self._body_scroll)
+        else:
+            self._body_scroll = None
+            body_layout.addWidget(content)
         self._body_layout = body_layout
 
-        root.addWidget(header)
-        root.addWidget(body, 1)
+        root.addWidget(self._header)
+        root.addWidget(self._body, 1)
+        self.set_expanded(self._expanded)
 
     def set_body_margins(self, left: int, top: int, right: int, bottom: int) -> None:
         self._body_layout.setContentsMargins(left, top, right, bottom)
+
+    def set_expanded_max_height(self, height: int | None) -> None:
+        if height is None:
+            self._expanded_max_height_cap = None
+        else:
+            self._expanded_max_height_cap = max(1, int(height))
+        if self._expanded:
+            self.set_expanded(True)
+
+    def set_expanded_min_height(self, height: int) -> None:
+        self._expanded_min_height = max(0, int(height))
+        if self._expanded:
+            self.set_expanded(True)
+
+    def set_expanded_size_policy(self, policy: QtWidgets.QSizePolicy) -> None:
+        self._expanded_size_policy = QtWidgets.QSizePolicy(policy)
+        if self._expanded:
+            self.setSizePolicy(self._expanded_size_policy)
+
+    def set_keep_expanding_when_collapsed(self, enabled: bool) -> None:
+        self._keep_expanding_when_collapsed = bool(enabled)
+        if not self._expanded:
+            self.set_expanded(False)
+
+    def _on_toggled(self, checked: bool) -> None:
+        self.set_expanded(bool(checked))
+
+    def _on_header_mouse_press(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
+        if self._toggle_button is None:
+            return
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.set_expanded(not self._expanded)
+            event.accept()
+            return
+        event.ignore()
+
+    def _collapsed_height(self) -> int:
+        return max(18, int(self._header.sizeHint().height()) + 2)
+
+    def collapsed_height_hint(self) -> int:
+        return int(self._collapsed_height())
+
+    def set_expanded(self, expanded: bool) -> None:
+        new_expanded = bool(expanded)
+        changed = new_expanded != self._expanded
+        self._expanded = new_expanded
+        if self._toggle_button is not None:
+            self._toggle_button.blockSignals(True)
+            self._toggle_button.setChecked(self._expanded)
+            self._toggle_button.setArrowType(QtCore.Qt.ArrowType.DownArrow if self._expanded else QtCore.Qt.ArrowType.RightArrow)
+            self._toggle_button.blockSignals(False)
+        self._body.setVisible(self._expanded or (not self._collapsible))
+        if self._collapsible:
+            if self._expanded:
+                expanded_min = max(
+                    int(self._expanded_min_height),
+                    int(self._collapsed_height()),
+                    int(self.minimumSizeHint().height()),
+                )
+                self.setMinimumHeight(expanded_min)
+                max_height = int(self._expanded_max_height)
+                if self._expanded_max_height_cap is not None:
+                    max_height = min(max_height, int(self._expanded_max_height_cap))
+                    max_height = max(max_height, expanded_min)
+                self.setMaximumHeight(max_height)
+                self.setSizePolicy(self._expanded_size_policy)
+            else:
+                collapsed_height = self._collapsed_height()
+                self.setMinimumHeight(collapsed_height)
+                if self._keep_expanding_when_collapsed:
+                    max_height = int(self._expanded_max_height)
+                    if self._expanded_max_height_cap is not None:
+                        max_height = min(max_height, int(self._expanded_max_height_cap))
+                    self.setMaximumHeight(max_height)
+                    self.setSizePolicy(self._expanded_size_policy)
+                else:
+                    collapsed_policy = QtWidgets.QSizePolicy(self._expanded_size_policy)
+                    collapsed_policy.setVerticalPolicy(QtWidgets.QSizePolicy.Policy.Fixed)
+                    self.setSizePolicy(collapsed_policy)
+                    self.setMaximumHeight(collapsed_height)
+        self.updateGeometry()
+        if changed:
+            self.expanded_changed.emit(self._expanded)
+
+    def is_expanded(self) -> bool:
+        return bool(self._expanded)
+
+    def minimumSizeHint(self) -> QtCore.QSize:
+        base = super().minimumSizeHint()
+        if not self._collapsible:
+            return base
+        return QtCore.QSize(base.width(), max(base.height(), self._collapsed_height()))
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if not self._collapsible or not self._expanded:
+            return
+        old_h = int(event.oldSize().height())
+        new_h = int(event.size().height())
+        threshold = int(self._collapsed_height()) + 4
+        if old_h > threshold and new_h <= threshold:
+            QtCore.QTimer.singleShot(0, lambda: self.set_expanded(False))
 
 
 class CollapsibleSection(QtWidgets.QWidget):
@@ -576,7 +741,7 @@ class PreferencesDialog(QtWidgets.QDialog):
 
         metrics_box = QtWidgets.QGroupBox("Theme Layout")
         metrics_grid = QtWidgets.QGridLayout(metrics_box)
-        _configure_pref_grid(metrics_grid, 2)
+        _configure_pref_grid(metrics_grid, 3)
         self.panel_gap_spin = CleanStepSpinBox()
         self.panel_gap_spin.setRange(2, 24)
         self.panel_gap_spin.setValue(int(theme.get("panel_gap", DEFAULT_THEME["panel_gap"])))
@@ -601,6 +766,21 @@ class PreferencesDialog(QtWidgets.QDialog):
         overlay_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
         metrics_grid.addWidget(overlay_label, 1, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
         metrics_grid.addWidget(self.selection_overlay_opacity_spin, 1, 2)
+        self.path_sync_overlay_opacity_spin = CleanStepSpinBox()
+        self.path_sync_overlay_opacity_spin.setRange(0, 255)
+        self.path_sync_overlay_opacity_spin.setValue(
+            int(theme.get("path_sync_overlay_opacity", DEFAULT_THEME["path_sync_overlay_opacity"]))
+        )
+        self.path_sync_overlay_opacity_spin.setMinimumWidth(control_min_width)
+        self.path_sync_overlay_opacity_spin.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed
+        )
+        path_sync_overlay_label = QtWidgets.QLabel("Path Sync Overlay Opacity")
+        path_sync_overlay_label.setObjectName("parameterLabel")
+        path_sync_overlay_label.setFixedWidth(label_width)
+        path_sync_overlay_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        metrics_grid.addWidget(path_sync_overlay_label, 2, 0, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+        metrics_grid.addWidget(self.path_sync_overlay_opacity_spin, 2, 2)
         colors_root.addWidget(metrics_box)
         buttons = QtWidgets.QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
@@ -622,6 +802,19 @@ class PreferencesDialog(QtWidgets.QDialog):
         colors_root.addWidget(buttons_host)
         theme_panel = PanelFrame("Theme", theme_host)
 
+        third_party_host = QtWidgets.QWidget()
+        third_party_host.setObjectName("transparentHost")
+        third_party_layout = QtWidgets.QVBoxLayout(third_party_host)
+        third_party_layout.setContentsMargins(10, 10, 10, 10)
+        third_party_layout.setSpacing(8)
+        third_party_notice = QtWidgets.QLabel(TABLER_NOTIFICATION_NOTICE_HTML)
+        third_party_notice.setWordWrap(True)
+        third_party_notice.setOpenExternalLinks(True)
+        third_party_notice.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        third_party_notice.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextBrowserInteraction)
+        third_party_layout.addWidget(third_party_notice)
+        third_party_panel = PanelFrame("Third-Party Assets", third_party_host)
+
         scroll_layout.addWidget(settings_panel)
         scroll_layout.addWidget(player_settings_panel)
         scroll_layout.addWidget(experimental_panel)
@@ -629,6 +822,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         scroll_layout.addWidget(device_panel)
         scroll_layout.addWidget(logs_panel)
         scroll_layout.addWidget(theme_panel)
+        scroll_layout.addWidget(third_party_panel)
         scroll_layout.addStretch(1)
 
         scroll.setWidget(scroll_host)
@@ -700,6 +894,7 @@ class PreferencesDialog(QtWidgets.QDialog):
             btn.set_color_hex(DEFAULT_THEME[key])
         self.panel_gap_spin.setValue(int(DEFAULT_THEME.get("panel_gap", 6)))
         self.selection_overlay_opacity_spin.setValue(int(DEFAULT_THEME.get("selection_overlay_opacity", 95)))
+        self.path_sync_overlay_opacity_spin.setValue(int(DEFAULT_THEME.get("path_sync_overlay_opacity", 28)))
 
     def refresh_logs_summary(self) -> None:
         try:
@@ -755,6 +950,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         theme = {key: btn.color_hex() for key, btn in self._theme_buttons.items()}
         theme["panel_gap"] = int(self.panel_gap_spin.value())
         theme["selection_overlay_opacity"] = int(self.selection_overlay_opacity_spin.value())
+        theme["path_sync_overlay_opacity"] = int(self.path_sync_overlay_opacity_spin.value())
         return {
             "hbatch_path": self.hbatch_edit.text().strip(),
             "player_path": self.player_edit.text().strip(),
@@ -1593,6 +1789,9 @@ class QueueTableView(QtWidgets.QTableView):
         "Render From First Missing",
         "Overwrite",
     ]
+    AUTOSCROLL_INTERVAL_MS = 16
+    AUTOSCROLL_DEADZONE_PX = 10
+    AUTOSCROLL_MAX_STEP = 48
 
     row_reordered_by_drag = QtCore.Signal(int, int)
     rows_reordered_by_drag = QtCore.Signal(list, int)
@@ -1603,6 +1802,7 @@ class QueueTableView(QtWidgets.QTableView):
         self.selection_row_color = QtGui.QColor(DEFAULT_THEME["selection_row"])
         self.selection_row_alt_color = QtGui.QColor(DEFAULT_THEME["selection_row_alt"])
         self.selection_overlay_opacity = int(DEFAULT_THEME.get("selection_overlay_opacity", 95))
+        self.path_sync_overlay_opacity = int(DEFAULT_THEME.get("path_sync_overlay_opacity", 28))
         self.stats_split_after_visual_index: int | None = None
         self.stats_split_line_color = QtGui.QColor("#5a5a5a")
         self.progress_usd_build_color = QtGui.QColor(DEFAULT_THEME.get("progress_usd_build", "#11b7b7"))
@@ -1620,6 +1820,76 @@ class QueueTableView(QtWidgets.QTableView):
         self._frame_handling_target_rows: list[int] = []
         self._suppress_frame_handling_popup_once = False
         self._suppress_enter_retrigger_once = False
+        self._autoscroll_active = False
+        self._autoscroll_anchor_global: QtCore.QPoint | None = None
+        self._autoscroll_anchor_viewport: QtCore.QPoint | None = None
+        self._autoscroll_timer = QtCore.QTimer(self)
+        self._autoscroll_timer.setInterval(self.AUTOSCROLL_INTERVAL_MS)
+        self._autoscroll_timer.timeout.connect(self._tick_autoscroll)
+
+    @classmethod
+    def _autoscroll_step_for_offset(cls, offset: int) -> int:
+        magnitude = abs(int(offset))
+        if magnitude <= cls.AUTOSCROLL_DEADZONE_PX:
+            return 0
+        effective = magnitude - cls.AUTOSCROLL_DEADZONE_PX
+        step = min(cls.AUTOSCROLL_MAX_STEP, max(1, int(round((effective ** 1.1) / 5.0))))
+        return -step if offset < 0 else step
+
+    def _start_autoscroll(self, event: QtGui.QMouseEvent) -> None:
+        self._autoscroll_active = True
+        self._autoscroll_anchor_global = event.globalPosition().toPoint()
+        self._autoscroll_anchor_viewport = event.position().toPoint()
+        self.viewport().setCursor(QtCore.Qt.CursorShape.SizeAllCursor)
+        self._autoscroll_timer.start()
+        self.viewport().update()
+
+    def _stop_autoscroll(self) -> None:
+        if not self._autoscroll_active and not self._autoscroll_timer.isActive():
+            return
+        self._autoscroll_active = False
+        self._autoscroll_anchor_global = None
+        self._autoscroll_anchor_viewport = None
+        self._autoscroll_timer.stop()
+        self.viewport().unsetCursor()
+        self.viewport().update()
+
+    def _autoscroll_should_stop(self, cursor_pos: QtCore.QPoint) -> bool:
+        if not self._autoscroll_active or self._autoscroll_anchor_global is None:
+            return True
+        if not bool(QtWidgets.QApplication.mouseButtons() & QtCore.Qt.MouseButton.MiddleButton):
+            return True
+        window = self.window()
+        if isinstance(window, QtWidgets.QWidget) and not window.frameGeometry().contains(cursor_pos):
+            return True
+        return False
+
+    def _paint_autoscroll_marker(self, painter: QtGui.QPainter) -> None:
+        if not self._autoscroll_active or self._autoscroll_anchor_viewport is None:
+            return
+        center = self._autoscroll_anchor_viewport
+        marker_rect = QtCore.QRect(center.x() - 8, center.y() - 8, 16, 16)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QtGui.QPen(QtGui.QColor(190, 190, 190, 220), 1))
+        painter.setBrush(QtGui.QColor(28, 28, 28, 200))
+        painter.drawEllipse(marker_rect)
+        painter.drawLine(center.x() - 4, center.y(), center.x() + 4, center.y())
+        painter.drawLine(center.x(), center.y() - 4, center.x(), center.y() + 4)
+
+    def _tick_autoscroll(self) -> None:
+        cursor_pos = QtGui.QCursor.pos()
+        if self._autoscroll_should_stop(cursor_pos):
+            self._stop_autoscroll()
+            return
+        offset = cursor_pos - self._autoscroll_anchor_global
+        dx = self._autoscroll_step_for_offset(offset.x())
+        dy = self._autoscroll_step_for_offset(offset.y())
+        if dx:
+            hbar = self.horizontalScrollBar()
+            hbar.setValue(hbar.value() + dx)
+        if dy:
+            vbar = self.verticalScrollBar()
+            vbar.setValue(vbar.value() + dy)
 
     def clear_frame_handling_interaction_state(self) -> None:
         self._suppress_drag_select_until_release = False
@@ -1698,6 +1968,7 @@ class QueueTableView(QtWidgets.QTableView):
                     pen.setWidth(2)
                     painter.setPen(pen)
                     painter.drawLine(0, y, self.viewport().width(), y)
+            self._paint_autoscroll_marker(painter)
         finally:
             painter.end()
 
@@ -1871,6 +2142,10 @@ class QueueTableView(QtWidgets.QTableView):
         return False
 
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if self._autoscroll_active and event.key() == QtCore.Qt.Key.Key_Escape:
+            self._stop_autoscroll()
+            event.accept()
+            return
         if self._suppress_enter_retrigger_once and event.key() in {QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter}:
             self._suppress_enter_retrigger_once = False
             event.accept()
@@ -1908,6 +2183,13 @@ class QueueTableView(QtWidgets.QTableView):
         sm.setCurrentIndex(idx, QtCore.QItemSelectionModel.SelectionFlag.NoUpdate)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.MiddleButton:
+            if not self._autoscroll_active:
+                self._start_autoscroll(event)
+            event.accept()
+            return
+        if self._autoscroll_active:
+            self._stop_autoscroll()
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
             self._pending_preserved_drag_rows = []
             self._pending_preserved_drag_pos = None
@@ -1973,6 +2255,9 @@ class QueueTableView(QtWidgets.QTableView):
         self.clear_frame_handling_interaction_state()
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._autoscroll_active:
+            event.accept()
+            return
         if self._suppress_drag_select_until_release and (event.buttons() & QtCore.Qt.MouseButton.LeftButton):
             event.accept()
             return
@@ -1991,6 +2276,10 @@ class QueueTableView(QtWidgets.QTableView):
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
         try:
+            if event.button() == QtCore.Qt.MouseButton.MiddleButton:
+                self._stop_autoscroll()
+                event.accept()
+                return
             if event.button() == QtCore.Qt.MouseButton.LeftButton and self._pending_preserved_drag_rows:
                 pos = event.position().toPoint()
                 idx = self.indexAt(pos)
@@ -2012,6 +2301,10 @@ class QueueTableView(QtWidgets.QTableView):
     def scrollContentsBy(self, dx: int, dy: int) -> None:
         super().scrollContentsBy(dx, dy)
         self._update_inline_editor_geometry()
+
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        self._stop_autoscroll()
+        super().hideEvent(event)
 
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
@@ -2471,6 +2764,14 @@ class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
             travel_ratio = (overlay_rect.center().y() - rect.top()) / float(rect.height())
         travel_ratio = max(0.0, min(1.0, travel_ratio))
         alpha_scale = travel_ratio
+        max_alpha = int(DEFAULT_THEME.get("path_sync_overlay_opacity", 28))
+        if widget is not None:
+            try:
+                max_alpha = int(getattr(widget, "path_sync_overlay_opacity", max_alpha))
+            except Exception:
+                max_alpha = int(DEFAULT_THEME.get("path_sync_overlay_opacity", 28))
+        max_alpha = max(0, min(255, max_alpha))
+        side_alpha = max(0, min(255, int(round(max_alpha * 0.5))))
 
         gradient = QtGui.QLinearGradient(overlay_rect.left(), overlay_rect.bottom(), overlay_rect.left(), overlay_rect.top())
         base = QtGui.QColor("#ffffff")
@@ -2481,9 +2782,9 @@ class QueueTableItemDelegate(QtWidgets.QStyledItemDelegate):
             return c
 
         gradient.setColorAt(0.0, _color(0))
-        gradient.setColorAt(0.2, _color(10))
-        gradient.setColorAt(0.5, _color(20))
-        gradient.setColorAt(0.8, _color(10))
+        gradient.setColorAt(0.2, _color(side_alpha))
+        gradient.setColorAt(0.5, _color(max_alpha))
+        gradient.setColorAt(0.8, _color(side_alpha))
         gradient.setColorAt(1.0, _color(0))
         painter.save()
         painter.setClipRect(rect)

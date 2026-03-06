@@ -22,6 +22,7 @@ DEFAULT_THEME: dict[str, Any] = {
     "selection_row": "#a6b9cf",
     "selection_row_alt": "#cde4ff",
     "selection_overlay_opacity": 50,
+    "path_sync_overlay_opacity": 28,
     "selection_line_enabled": True,
     "selection_line_thickness": 1,
     "queue_running": "#3e5e5d",
@@ -33,12 +34,15 @@ DEFAULT_THEME: dict[str, Any] = {
     "panel_gap": 8,
 }
 
+SCROLLBAR_THICKNESS = 14
+SCROLLBAR_MARGIN = 3
+
 
 def normalize_theme_colors(theme: dict[str, Any] | None) -> dict[str, Any]:
     merged = dict(DEFAULT_THEME)
     if not isinstance(theme, dict):
         return merged
-    numeric_keys = {"panel_gap", "selection_line_thickness", "selection_overlay_opacity"}
+    numeric_keys = {"panel_gap", "selection_line_thickness", "selection_overlay_opacity", "path_sync_overlay_opacity"}
     bool_keys = {"selection_line_enabled"}
     for key in merged:
         value = theme.get(key, merged[key])
@@ -49,7 +53,7 @@ def normalize_theme_colors(theme: dict[str, Any] | None) -> dict[str, Any]:
             try:
                 if key == "panel_gap":
                     merged[key] = max(2, min(24, int(value)))
-                elif key == "selection_overlay_opacity":
+                elif key in {"selection_overlay_opacity", "path_sync_overlay_opacity"}:
                     merged[key] = max(0, min(255, int(value)))
                 else:
                     merged[key] = max(0, min(6, int(value)))
@@ -59,6 +63,16 @@ def normalize_theme_colors(theme: dict[str, Any] | None) -> dict[str, Any]:
         if isinstance(value, str) and QtGui.QColor(value).isValid():
             merged[key] = QtGui.QColor(value).name()
     return merged
+
+
+def styled_scrollbar_extent(theme: dict[str, Any] | None = None) -> int:
+    _ = theme
+    return int(SCROLLBAR_THICKNESS + (SCROLLBAR_MARGIN * 2))
+
+
+def styled_scrollbar_content_gap(theme: dict[str, Any] | None = None) -> int:
+    _ = theme
+    return int(SCROLLBAR_MARGIN * 2)
 
 
 def ensure_theme_icons(icons_dir: Path, theme: dict[str, str]) -> dict[str, str]:
@@ -252,6 +266,12 @@ def build_app_stylesheet(theme: dict[str, str], icons: dict[str, str]) -> str:
     button_pressed_bg = button_base.lighter(106).name()
     sel_row_rgba = QtGui.QColor(t["selection_row"])
     sel_row_alt_rgba = QtGui.QColor(t["selection_row_alt"])
+    scrollbar_thumb = QtGui.QColor(t["button_bg"]).lighter(118).name()
+    scrollbar_thumb_hover = QtGui.QColor(t["button_bg"]).lighter(132).name()
+    scrollbar_thumb_pressed = QtGui.QColor(t["button_bg"]).lighter(146).name()
+    scrollbar_thickness = int(SCROLLBAR_THICKNESS)
+    scrollbar_margin = int(SCROLLBAR_MARGIN)
+    scrollbar_radius = max(4, (scrollbar_thickness + (scrollbar_margin * 2)) // 2)
     try:
         sel_alpha = max(0, min(255, int(t.get("selection_overlay_opacity", 95))))
     except Exception:
@@ -261,6 +281,14 @@ def build_app_stylesheet(theme: dict[str, str], icons: dict[str, str]) -> str:
     sel_row_css = sel_row_rgba.name(QtGui.QColor.NameFormat.HexArgb)
     sel_row_alt_css = sel_row_alt_rgba.name(QtGui.QColor.NameFormat.HexArgb)
     return f"""
+        QMainWindow#mainWindow {{
+            background-color: {t['background']};
+            color: {t['text']};
+        }}
+        QWidget#mainWindowCentral {{
+            background-color: {t['background']};
+            color: {t['text']};
+        }}
         QWidget {{
             background-color: {t['background']};
             color: {t['text']};
@@ -315,6 +343,17 @@ def build_app_stylesheet(theme: dict[str, str], icons: dict[str, str]) -> str:
             color: {t['text']};
             font-weight: 500;
         }}
+        QToolButton#panelFrameToggle {{
+            background: transparent;
+            border: none;
+            padding: 0px;
+        }}
+        QToolButton#panelFrameToggle:hover {{
+            background: transparent;
+        }}
+        QToolButton#panelFrameToggle:pressed {{
+            background: transparent;
+        }}
         QLabel#parameterLabel {{
             background-color: transparent;
             color: #b8b8b8;
@@ -322,6 +361,20 @@ def build_app_stylesheet(theme: dict[str, str], icons: dict[str, str]) -> str:
         QWidget#panelFrameBody {{
             background-color: transparent;
             border: none;
+        }}
+        QScrollArea#panelFrameBodyScroll {{
+            background: transparent;
+            border: none;
+        }}
+        QScrollArea#panelFrameBodyScroll > QWidget > QWidget {{
+            background: transparent;
+        }}
+        QScrollArea#leftPaneScroll {{
+            background: transparent;
+            border: none;
+        }}
+        QScrollArea#leftPaneScroll > QWidget > QWidget {{
+            background: transparent;
         }}
         QGroupBox {{
             background-color: {t['panel_bg']};
@@ -726,20 +779,22 @@ def build_app_stylesheet(theme: dict[str, str], icons: dict[str, str]) -> str:
         }}
         QScrollBar:vertical {{
             background: transparent;
-            width: 12px;
-            margin: 2px 2px 2px 2px;
+            width: {scrollbar_thickness}px;
+            margin: {scrollbar_margin}px;
+            border: none;
+            border-radius: {scrollbar_radius}px;
         }}
         QScrollBar::handle:vertical {{
-            background: #555555;
-            border: 1px solid #666666;
-            border-radius: 5px;
-            min-height: 24px;
+            background: {scrollbar_thumb};
+            border: none;
+            border-radius: {scrollbar_radius}px;
+            min-height: 28px;
         }}
         QScrollBar::handle:vertical:hover {{
-            background: #676767;
+            background: {scrollbar_thumb_hover};
         }}
         QScrollBar::handle:vertical:pressed {{
-            background: #7a7a7a;
+            background: {scrollbar_thumb_pressed};
         }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
             background: transparent;
@@ -751,20 +806,22 @@ def build_app_stylesheet(theme: dict[str, str], icons: dict[str, str]) -> str:
         }}
         QScrollBar:horizontal {{
             background: transparent;
-            height: 12px;
-            margin: 2px 2px 2px 2px;
+            height: {scrollbar_thickness}px;
+            margin: {scrollbar_margin}px;
+            border: none;
+            border-radius: {scrollbar_radius}px;
         }}
         QScrollBar::handle:horizontal {{
-            background: #555555;
-            border: 1px solid #666666;
-            border-radius: 5px;
-            min-width: 24px;
+            background: {scrollbar_thumb};
+            border: none;
+            border-radius: {scrollbar_radius}px;
+            min-width: 28px;
         }}
         QScrollBar::handle:horizontal:hover {{
-            background: #676767;
+            background: {scrollbar_thumb_hover};
         }}
         QScrollBar::handle:horizontal:pressed {{
-            background: #7a7a7a;
+            background: {scrollbar_thumb_pressed};
         }}
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
             background: transparent;
@@ -772,6 +829,25 @@ def build_app_stylesheet(theme: dict[str, str], icons: dict[str, str]) -> str:
             width: 0px;
         }}
         QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+            background: transparent;
+        }}
+        QScrollArea#leftPaneScroll QScrollBar:vertical,
+        QScrollArea#panelFrameBodyScroll QScrollBar:vertical {{
+            background: transparent;
+        }}
+        QScrollArea#leftPaneScroll QScrollBar::handle:vertical,
+        QScrollArea#panelFrameBodyScroll QScrollBar::handle:vertical {{
+            background: {QtGui.QColor(scrollbar_thumb).lighter(104).name()};
+        }}
+        QScrollArea#leftPaneScroll QScrollBar::handle:vertical:hover,
+        QScrollArea#panelFrameBodyScroll QScrollBar::handle:vertical:hover {{
+            background: {QtGui.QColor(scrollbar_thumb_hover).lighter(104).name()};
+        }}
+        QPlainTextEdit QScrollBar,
+        QTableView QScrollBar,
+        QTreeView QScrollBar,
+        QListView QScrollBar,
+        QListWidget QScrollBar {{
             background: transparent;
         }}
         QMenu {{

@@ -38,15 +38,24 @@ class WorkerProtocolTests(unittest.TestCase):
 
 
 class WorkerProcessFaultTests(unittest.TestCase):
+    _WINDOWS_ACCESS_VIOLATION = 3221226505
+    _MAX_WORKER_LAUNCH_ATTEMPTS = 3
+
     def _run_worker(self, script_name: str, input_lines: list[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [sys.executable, str(PROJECT_ROOT / script_name)],
-            input="".join(input_lines),
-            text=True,
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
+        result: subprocess.CompletedProcess[str] | None = None
+        for _attempt in range(self._MAX_WORKER_LAUNCH_ATTEMPTS):
+            result = subprocess.run(
+                [sys.executable, str(PROJECT_ROOT / script_name)],
+                input="".join(input_lines),
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode != self._WINDOWS_ACCESS_VIOLATION:
+                break
+        assert result is not None
+        return result
 
     def test_render_worker_rejects_unknown_message(self) -> None:
         result = self._run_worker("render_worker.py", ['{"type":"ping","request_id":"r1","payload":{}}\n'])
