@@ -33,8 +33,6 @@ Current validation scope:
 - background worker processes for rendering and scanning
 - Karma / Solaris / USD workflow support
 
----
-
 ## Download
 
 Download the latest Windows executable from the project's **[Releases](../../releases)** page.  
