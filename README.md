@@ -56,6 +56,10 @@ The release package includes:
 5. Open **Preferences** and set the path to your preferred sequence player.
 6. Ensure `husk` is available in your Houdini installation.
 
+**Note:** Some antivirus engines may flag the packaged executable 
+because it is built with PyInstaller and launches subprocesses.
+The source code is available in this repository.
+
 ## Intended Use
 
 This tool is designed for:
